@@ -5,6 +5,7 @@
 #include <vector>
 #include <variant>
 #include <concepts>
+#include <stdexcept>
 
 #include "tokens.hpp"
 #include "errors/error.hpp"
@@ -54,11 +55,19 @@ class Parser {
         if (is_at_end()) return tokens.at(current);
         return tokens.at(current + 1);
     }
+    Token expect(TokenType type, const std::string msg) {
+        if (check(type)) return advance();
+
+        throw std::runtime_error(msg);
+    }
 
     Node* parse_type();
     Node* parse_literal();
     Node* parse_pattern();
 
+    Node* parse_struct_init();
+    Node* parse_builtin();
+    bool is_builtin(Token tok);
     Node* parse_primary();
     Node* parse_postfix();
     Node* parse_unary();

@@ -61,9 +61,9 @@ class Lexer {
 
 
 
-        std::unordered_map<std::string_view, TokenType> map {
-            {"(", LPAREN}, {")", RPAREN}, {"{", LBRKT}, {"}", RBRKT}, {";", SEMI}, {"-", TIR}
-        };
+        //std::unordered_map<std::string_view, TokenType> map {
+        //    {"(", LPAREN}, {")", RPAREN}, {"{", LBRKT}, {"}", RBRKT}, {";", SEMI}, {"-", }
+        //};
 
         std::unordered_map<std::string, TokenType> identmap {
             {"if", IF},
@@ -72,7 +72,21 @@ class Lexer {
             {"for", FOR},
             {"return", RETURN},
             {"true", TRUE},
-            {"false", FALSE}
+            {"false", FALSE},
+            {"fn", FN}, {"struct", STRUCT}, {"let", LET}, {"const", CONST},
+            {"loop", LOOP}, {"match", MATCH}, {"break", BREAK}, {"continue", CONTINUE},
+            {"in", IN}, {"mut", MUT},
+            {"some", SOME}, {"none", NONE}, {"ok", OK}, {"err", ERR},
+            {"optional", OPTIONAL}, {"result", RESULT}, {"shared", SHARED}, {"weak", WEAK},
+            {"sign", SIGN}, {"unsign", UNSIGN}, {"trunc_cast", TRUNC_CAST}, {"check_cast", CHECK_CAST},
+            {"wrap_add", WRAP_ADD}, {"wrap_sub", WRAP_SUB}, {"wrap_mul", WRAP_MUL},
+
+            //TYPENAMES:
+            {"bool", BOOL}, {"unit", UNIT}, 
+            {"int8", INT8}, {"int16", INT16}, {"int32", INT32}, {"int64", INT64}, 
+            {"uint8", UINT8}, {"uint16", UINT16}, {"uint32", UINT32}, {"uint64", UINT64}, 
+            {"flo32", FLO32}, {"flo64", FLO64}, 
+            {"char", CHAR}, {"string", STRING}, {"string_view", STRING_VIEW}, {"buf_string", BUF_STRING}
         };
 
         std::vector<Token> tokens;

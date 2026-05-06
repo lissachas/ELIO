@@ -6,16 +6,44 @@
 using Object = std::variant<int, std::string_view, double>;
 
 typedef enum TokenType {
-    COMMA, DOT, SEMI, TIR, HASH, LBRKT, RBRKT, LPAREN, RPAREN, 
+    COMMA, //,
+    DOT, //.
+    SEMI, //;
+    COLON, //:
+    HASH, //#
+    LBRKT, //{
+    RBRKT, //}
+    LPAREN, //(
+    RPAREN, //)
+    COLON_EQUAL, //:=
+    ARROW, //->
+    FAT_ARROW, //=>
+    AMP, //&
+    PIPE, //|
+    LSQUARE, //[
+    RSQUARE, //]
+    AND_AND, //&&
+    OR_OR, //||
+    PERCENT, //%
+    UNDERSCORE, //_
 
     PLUS, MINUS, STAR, SLASH,
 
-    EQUAL, GREATER, LESS, GREATER_EQUAL, LESS_EQUAL, NOT_EQUAL, BANG,
+    EQUAL, GREATER, LESS, GREATER_EQUAL, LESS_EQUAL, NOT_EQUAL, BANG, EQUAL_EQUAL, BANG_EQUAL,
 
     STR, VAL, IDENT,
 
     //Keywords
-    IF, ELSE, WHILE, FOR, RETURN, TRUE, FALSE,
+    IF, ELSE, WHILE, FOR, RETURN, TRUE, FALSE, NONE,
+    FN, STRUCT, LET, CONST, LOOP, MATCH, BREAK, CONTINUE, 
+    IN, MUT, SOME, OK, ERR, OPTIONAL, RESULT, SHARED, WEAK,
+    SIGN, UNSIGN, TRUNC_CAST, CHECK_CAST, 
+    WRAP_ADD, WRAP_SUB, WRAP_MUL, 
+
+    //Primitive types
+    BOOL, UNIT, INT8, INT16, INT32, INT64,
+    UINT8, UINT16, UINT32, UINT64,
+    FLO32, FLO64, CHAR, STRING, STRING_VIEW, BUF_STRING,
 
     END
 
@@ -23,12 +51,12 @@ typedef enum TokenType {
 
 class Token {
     private:
-    std::string_view value;
     Object literal;
     int line;
 
     public:
     TokenType type;
+    std::string_view value;
     Token(std::string_view value, Object literal, TokenType type, int line) : value{value}, literal{literal}, type{type}, line{line} {
 
     }

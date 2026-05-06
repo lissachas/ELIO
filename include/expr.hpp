@@ -138,7 +138,7 @@ struct BlockExpr: Node {
 };
 
 struct StructInit: Node {
-    Identifier ident;
+    Token name;
     std::vector<Node*> opt;
 };
 

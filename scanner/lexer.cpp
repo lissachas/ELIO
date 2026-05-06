@@ -22,14 +22,23 @@ Token Lexer::lex() {
     case '{': create_token(LBRKT); break;
     case '}': create_token(RBRKT); break;
     case '#': create_token(HASH); break;
-    case ':': create_token(TIR); break;
+    case '[': create_token(LSQUARE); break;
+    case ']': create_token(RSQUARE); break;
+    case '%': create_token(PERCENT); break;
+    case ':': create_token(match('=')? COLON_EQUAL : COLON); break;
     case '+': create_token(PLUS); break;
-    case '-': create_token(MINUS); break;
+    case '-': create_token(match('>')? ARROW : MINUS); break;
     case '*': create_token(STAR); break;
     case '!': create_token(match('=')? NOT_EQUAL : BANG); break;
     case '>': create_token(match('=')? GREATER_EQUAL : GREATER); break;
     case '<': create_token(match('=')? LESS_EQUAL : LESS); break;
-    case '=': create_token(EQUAL); break;
+    case '|': create_token(match('|')? OR_OR : PIPE); break;
+    case '&': create_token(match('&')? AND_AND : AMP); break;
+    case '=': 
+        if (match('=')) create_token(EQUAL_EQUAL);
+        else if (match('>')) create_token(FAT_ARROW);
+        else create_token(EQUAL);
+        break;
     case '/': 
         if (match('/')) {
             while(peek() != '\n' && !is_at_end()) advance();
