@@ -165,7 +165,9 @@ Node* Parser::parse_postfix() {
 Node* Parser::parse_primary() {
     if (match(TRUE, FALSE, NONE, VAL, STR)) return parse_literal();
 
-    if (check(IDENT) && is_builtin(peek())) {
+    if (check(SIGN) || check(UNSIGN) ||
+        check(TRUNC_CAST) || check(CHECK_CAST) ||
+        check(WRAP_ADD)   || check(WRAP_SUB) || check(WRAP_MUL)) {
         return parse_builtin();
     }
 
@@ -196,7 +198,32 @@ Node* Parser::parse_primary() {
 }
 
 Node* Parser::parse_literal() {
+    Token tok = previous();
+    auto* node = arena.alloc<Literal>();
+    node->type = NodeType::Literal;
+    node->token = tok;
 
+    switch (tok.type) {
+    case TRUE:
+    case FALSE:
+        node->literal = LiteralType::BoolLiteral;
+        break;
+    case NONE:
+        node->literal = LiteralType::UnitLiteral;
+        break;
+    case STR:
+        node->literal = LiteralType::StringLiteral;
+    case VAL:
+        if (tok.get_value().find('.') != std::string_view::npos)
+            node->literal = LiteralType::FloatLiteral;
+        else
+            node->literal = LiteralType::IntLiteral;
+        break;
+    default:
+        throw std::runtime_error("parse_literal: unexpected token");
+    }
+
+    return node;
 }
 
 bool Parser::is_builtin(Token tok) {
@@ -245,6 +272,7 @@ Node* Parser::parse_builtin() {
         throw std::runtime_error("parse_builtin: unknown builtin");
     }
 
+    return node;
 }
 
 Node* Parser::parse_struct_init() {
@@ -256,15 +284,26 @@ Node* Parser::parse_struct_init() {
     node->name = name;
 
     if (!check(RBRKT)) {
-        expect(RBRKT, "Expected field name in struct init");
-        Token field_name = previous();
+        do {
+            expect(RBRKT, "Expected field name in struct init");
+            Token field_name = previous();
 
-        auto* fi = arena.alloc<FieldInit>();
-        fi->type = NodeType::FieldInit;
-        
+            auto* fi = arena.alloc<FieldInit>();
+            fi->type = NodeType::FieldInit;
+            fi->name = field_name;
+
+            if (match(COLON)) {
+                fi->value = parse_expr();
+                fi->shorthand = false;
+            } else {
+                fi->value = nullptr;
+                fi->shorthand = true;
+            }
+            node->opt.push_back(fi);
+
+        } while (match(COMMA));
     }
 
-
-
-
+    expect(RBRKT, "Expected '}' after struct fields");
+    return node;
 }

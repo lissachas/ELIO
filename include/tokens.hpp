@@ -53,13 +53,15 @@ class Token {
     private:
     Object literal;
     int line;
+    std::string_view value;
 
     public:
     TokenType type;
-    std::string_view value;
     Token(std::string_view value, Object literal, TokenType type, int line) : value{value}, literal{literal}, type{type}, line{line} {
 
     }
+    std::string_view get_value() const { return value; }
+    Object get_literal()         const { return literal; }
 
     std::string to_string() {
             return type + " " + (std::string)value;
