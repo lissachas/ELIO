@@ -62,6 +62,7 @@ class Token {
     }
     std::string_view get_value() const { return value; }
     Object get_literal()         const { return literal; }
+    int get_line() const { return line; }
 
     std::string to_string() {
             return type + " " + (std::string)value;

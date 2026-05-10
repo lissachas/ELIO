@@ -24,7 +24,7 @@ enum class NodeType {
     // Expressions
     Literal, Identifier, BinaryExpr, UnaryExpr, CallExpr, IndexExpr, FieldExpr, AssignExpr, IfExpr, MatchExpr, LambdaExpr, BlockExpr, StructInit, BuiltInCast,
     // Statements
-    ExprStmt, IfStmt, WhileStmt, ForStmt, LoofStmt, MatchStmt, ReturnStmt, BreakStmt, ContinueStmt,
+    ExprStmt, IfStmt, WhileStmt, ForStmt, LoopStmt, MatchStmt, ReturnStmt, BreakStmt, ContinueStmt,
     // Declarations
     LetDecl, ConstDecl, FunctionDecl, StructDecl,
     // Other
@@ -114,7 +114,7 @@ struct AssignExpr: Node {
 
 struct IfExpr: Node {
     Node* condition;
-    BlockExpr* then_block;
+    Node* then_block;
     Node* else_expr;
 };
 
@@ -157,7 +157,7 @@ struct ExprStmt : Node {
 
 struct IfStmt : Node {
     Node* node;
-    BlockExpr* block;
+    Node* block;
     Node* other;
 };
 
@@ -165,13 +165,13 @@ struct WhileStmt : Node {
     bool has_tag;
     Token tag;
     Node* condition;
-    BlockExpr* block;
+    Node* block;
 };
 
 struct LoopStmt : Node {
     bool has_tag;
     Token tag;
-    BlockExpr* block;
+    Node* block;
 };
 
 struct ForStmt : Node {
@@ -179,7 +179,7 @@ struct ForStmt : Node {
     Token tag;
     Node* pattern;
     Node* node;
-    BlockExpr* block;
+    Node* block;
 };
 
 struct MatchStmt : Node {
@@ -211,7 +211,7 @@ struct LetDecl : Node {
 };
 
 struct ConstDecl : Node {
-    Identifier ident;
+    Token ident;
     Node*  type_ann;  // may be null if := used
     Node*  init;
 };

@@ -15,3 +15,15 @@ Regular expression (regex) - a formula describing what productions it can form (
 3. VAa->V - L(a) = {a}
 
 - Детерменированный Конечный Автомат ДКА DFA (Deterministic finite automation) :arrow_forward:
+
+
+
+## Other 
+
+- weakly_incrementable
+- incrementable
+- indirectly_readable
+
+# Sentinel
+
+# no push front

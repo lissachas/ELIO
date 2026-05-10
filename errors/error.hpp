@@ -5,10 +5,15 @@
 class Error {
     public: 
         void error(int line, std::string where, std::string message);
+        bool had_error() const { return _had_error; }
 
     private:
 
         void report(int line, std::string where, std::string message);
         
-        bool had_error = false;
+        bool _had_error = false;
+};
+
+struct ParseError : public std::exception {
+    const char* what() const noexcept override { return "parse error"; }
 };

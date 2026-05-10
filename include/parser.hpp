@@ -15,9 +15,10 @@
 class Parser {
     public:
     Node* parse();
-    Parser(std::vector<Token> tokens) : tokens{tokens} {}
+    Parser(std::vector<Token> tokens, Error& err) : tokens{tokens}, err{err} {}
 
     private:
+    Error& err;
     Arena arena;
     std::vector<Token> tokens;
     int current = 0;
@@ -55,15 +56,35 @@ class Parser {
         if (is_at_end()) return tokens.at(current);
         return tokens.at(current + 1);
     }
-    Token expect(TokenType type, const std::string msg) {
+    Token expect(TokenType type, const std::string& msg) {
         if (check(type)) return advance();
+        err.error(peek().get_line(), std::string(peek().get_value()), msg);
+        throw ParseError{};
+    }
 
-        throw std::runtime_error(msg);
+    void synchronize() {
+        advance();
+        while (!is_at_end()) {
+            if (previous().type == SEMI) return;
+            switch (peek().type) {
+                case FN: case STRUCT: case LET: case CONST:
+                case IF: case WHILE: case FOR: case RETURN: case LOOP:
+                    return;
+                default: break;
+            }
+            advance();
+        }
     }
 
     Node* parse_type();
     Node* parse_literal();
     Node* parse_pattern();
+    Node* parse_match_arm();
+    Node* parse_param_list();
+    Node* parse_arg_list();
+    Node* parse_param();
+    Node* parse_field_init();
+    Node* parse_field_decl();
 
     Node* parse_struct_init();
     Node* parse_builtin();
@@ -85,10 +106,24 @@ class Parser {
 
     Node* parse_block();
     Node* parse_statement();
+    Node* parse_let_decl();
+    Node* parse_const_decl();
+    Node* parse_if_stmt();
+    Node* parse_while_stmt();
+    Node* parse_for_stmt();
+    Node* parse_loop_stmt();
+    Node* parse_match_stmt();
+    Node* parse_return_stmt();
+    Node* parse_break_stmt();
+    Node* parse_continue_stmt();
+    Node* parse_expr_stmt();
 
     Node* parse_function_decl();
     Node* parse_struct_decl();
-
-    Node* parse_program();
+    Node* parse_global_decl();
+    Node* parse_let_decl();
+    Node* parse_const_decl();
+    Node* parse_item();
+    Node* parse();
 
 };
