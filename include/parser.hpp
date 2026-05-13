@@ -8,14 +8,14 @@
 #include <stdexcept>
 
 #include "tokens.hpp"
-#include "errors/error.hpp"
+#include "error.hpp"
 #include "lexer.hpp"
 #include "expr.hpp"
 
 class Parser {
     public:
     Node* parse();
-    Parser(std::vector<Token> tokens, Error& err) : tokens{tokens}, err{err} {}
+    Parser(std::vector<Token> tokens, Error& err) : err{err}, tokens{tokens}  {}
 
     private:
     Error& err;
@@ -26,7 +26,8 @@ class Parser {
     template<typename... Args> 
     requires (std::same_as<Args, TokenType> && ...)
     bool match(Args... types) {
-        for(TokenType type: types) {
+        // This had a problem and wouldn't compile. {types...} expands into std::initializer_list<TokenType> you can range-for over it
+        for(TokenType type: {types...}) {
             if (check(type)) {
                 advance();
                 return true;
@@ -58,7 +59,7 @@ class Parser {
     }
     Token expect(TokenType type, const std::string& msg) {
         if (check(type)) return advance();
-        err.error(peek().get_line(), std::string(peek().get_value()), msg);
+        err.error(peek().get_line(), std::string(peek().get_value()), msg.c_str());
         throw ParseError{};
     }
 
@@ -106,8 +107,6 @@ class Parser {
 
     Node* parse_block();
     Node* parse_statement();
-    Node* parse_let_decl();
-    Node* parse_const_decl();
     Node* parse_if_stmt();
     Node* parse_while_stmt();
     Node* parse_for_stmt();
@@ -124,6 +123,5 @@ class Parser {
     Node* parse_let_decl();
     Node* parse_const_decl();
     Node* parse_item();
-    Node* parse();
 
 };

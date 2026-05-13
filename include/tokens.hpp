@@ -57,6 +57,7 @@ class Token {
 
     public:
     TokenType type;
+    Token() : value{""}, literal{0}, type{END}, line{0} {}
     Token(std::string_view value, Object literal, TokenType type, int line) : value{value}, literal{literal}, type{type}, line{line} {
 
     }
@@ -65,6 +66,6 @@ class Token {
     int get_line() const { return line; }
 
     std::string to_string() {
-            return type + " " + (std::string)value;
+        return std::to_string(type) + " " + std::string(value);
     }
 };

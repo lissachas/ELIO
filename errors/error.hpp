@@ -5,13 +5,13 @@
 class Error {
     public: 
         void error(int line, std::string where, std::string message);
-        bool had_error() const { return _had_error; }
+        bool _had_error() const { return had_error; }
 
     private:
 
         void report(int line, std::string where, std::string message);
         
-        bool _had_error = false;
+        bool had_error = false;
 };
 
 struct ParseError : public std::exception {

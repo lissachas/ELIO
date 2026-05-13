@@ -1,3 +1,14 @@
+Compilation:
+rm -rf build
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
+cmake --build build
+./build/app
+
+git add .
+git commit -m "Parser fully done"
+git push
+
+
 2. Reference counting / ARC
 
 У каждого объекта есть счётчик ссылок:

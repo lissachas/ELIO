@@ -3,19 +3,6 @@
 #include <string>
 #include "lexer.hpp"
 
-int main(int argc, char const *argv[])
-{
-    if (argc > 1) {
-        printf("Usage: realize [script]");
-        exit(1);
-    } else if (argc == 1) {
-        run_file(argv[0]);
-    } else {
-        printf("Usage: realize [script]");
-        exit(1);
-    }
-    return 0;
-}
 
 void run_file(char const* filename) {
     std::string line;
@@ -31,4 +18,18 @@ void run_file(char const* filename) {
 
     Lexer lex;
     lex.start(set);
+}
+
+int main(int argc, char const *argv[])
+{
+    if (argc > 1) {
+        printf("Usage: realize [script]");
+        exit(1);
+    } else if (argc == 1) {
+        run_file(argv[0]);
+    } else {
+        printf("Usage: realize [script]");
+        exit(1);
+    }
+    return 0;
 }

@@ -6,7 +6,7 @@
 #include <variant>
 
 #include "tokens.hpp"
-#include "errors/error.hpp"
+#include "error.hpp"
 
 struct Arena {
     std::vector<std::byte> buf;

@@ -6,7 +6,7 @@
 #include <variant>
 
 #include "tokens.hpp"
-#include "errors/error.hpp"
+#include "error.hpp"
 #include "parser.hpp"
 
 using Object = std::variant<int, std::string_view, double>;
