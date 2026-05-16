@@ -12,11 +12,14 @@ add_executable(app
     scanner/lexer.cpp
     scanner/parser.cpp
     errors/error.cpp
+    analysis/resolve.cpp
 )
 
 target_include_directories(app 
     PRIVATE include
     PRIVATE errors
+    PRIVATE syntax
+
 )
 
 find_package(LLVM REQUIRED CONFIG)

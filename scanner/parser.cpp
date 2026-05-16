@@ -687,7 +687,41 @@ Node* Parser::parse_struct_init() {
 
 // ADDITIONAL PARSING
 Node* Parser::parse_type() {
-    
+    auto* node = arena.alloc<TypeNode>();
+    node->type  = NodeType::TypeNode;
+    node->inner = node->inner2 = nullptr;
+    node->array_size = 0;
+
+    if (match(AMP)) {
+        node->type_type = match(MUT) ? TypeType::RefMut : TypeType::Ref;
+        node->inner = parse_type();
+        return node;
+    }
+    if (match(LSQUARE)) {
+        node->type_type  = TypeType::Array;
+        node->inner      = parse_type();
+        expect(SEMI, "Expected ';' in array type");
+        expect(VAL,  "Expected size");
+        node->array_size = (size_t)std::get<double>(previous().get_literal());
+        expect(RSQUARE, "Expected ']'");
+        return node;
+    }
+    if (match(OPTIONAL)) { node->type_type = TypeType::Optional; expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
+    if (match(RESULT))   { node->type_type = TypeType::Result;   expect(LSQUARE,"["); node->inner = parse_type(); expect(COMMA,","); node->inner2 = parse_type(); expect(RSQUARE,"]"); return node; }
+    if (match(SHARED))   { node->type_type = TypeType::Shared;   expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
+    if (match(WEAK))     { node->type_type = TypeType::Weak;     expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
+
+    if (match(BOOL,UNIT,INT8,INT16,INT32,INT64,UINT8,UINT16,UINT32,UINT64,FLO32,FLO64,CHAR,STRING,STRING_VIEW,BUF_STRING)) {
+        node->type_type = TypeType::Primitive;
+        node->name = previous();
+        return node;
+    }
+    if (match(IDENT)) {
+        node->type_type = TypeType::Named;
+        node->name = previous();
+        return node;
+    }
+    throw std::runtime_error("Expected type");
 }
 
 Node* Parser::parse_pattern() {
