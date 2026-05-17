@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <string>
 #include <unordered_map>
@@ -8,22 +8,34 @@
 #include <concepts>
 #include <stdexcept>
 
-#include "tokens.hpp"
-#include "error.hpp"
-#include "lexer.hpp"
-#include "expr.hpp"
+export module symbol;
 
-struct Symbol {
-    Token name; //
+import lexer;
+import tokens;
+import error;
+import parser;
+import expr;
+
+export enum class SymbolType {
+    Let, Const, Param, Function, Struct
+};
+
+export struct Symbol {
+    SymbolType type; // Symbol type 
+    Token name; // the node name
     Node* type_node; // Typenode from declaration
     Node* decl; // Backpointer to declaration
     bool is_mutable; //
 };
 
-class Scope {
+
+
+export class Scope {
     public:
         std::unordered_map<std::string_view, Symbol> symbols;
         Scope* parent = nullptr;
+
+        explicit Scope(Scope* parent) : parent{parent} {}
 
         Symbol* lookup(std::string_view name) {
             if (symbols.contains(name)) return &symbols[name];

@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <string>
 #include <unordered_map>
@@ -8,13 +8,18 @@
 #include <concepts>
 #include <stdexcept>
 
-#include "tokens.hpp"
-#include "error.hpp"
-#include "lexer.hpp"
-#include "expr.hpp"
+export module typecheck;
+
+import lexer;
+import tokens;
+import error;
+import parser;
+import symbol;
+import resolve;
+import expr;
 
 
-class TypeChecker {
+export class TypeChecker {
     public:
 
     private:

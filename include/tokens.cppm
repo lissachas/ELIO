@@ -1,11 +1,13 @@
-#pragma once
+module;
+
 #include <string>
 #include <string_view>
 #include <variant>
 
+export module tokens;
 using Object = std::variant<int, std::string_view, double>;
 
-typedef enum TokenType {
+export typedef enum TokenType {
     COMMA, //,
     DOT, //.
     SEMI, //;
@@ -49,7 +51,7 @@ typedef enum TokenType {
 
 };
 
-class Token {
+export class Token {
     private:
     Object literal;
     int line;

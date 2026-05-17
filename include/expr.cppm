@@ -1,12 +1,17 @@
-#pragma once
+module;
+
 #include <string>
 #include <unordered_map>
 #include <string_view>
 #include <vector>
 #include <variant>
 
-#include "tokens.hpp"
-#include "error.hpp"
+export module expr;
+
+import tokens;
+import error;
+
+export {
 
 struct Arena {
     std::vector<std::byte> buf;
@@ -246,3 +251,5 @@ struct FieldInit : Node {
     Node*  value;       // null if shorthand `{ x }` instead of `{ x: expr }`
     bool   shorthand;
 };
+
+}

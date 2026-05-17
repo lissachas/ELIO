@@ -1,7 +1,9 @@
+
 #include <iostream>
 #include <fstream>
 #include <string>
-#include "lexer.hpp"
+
+import lexer;
 
 
 void run_file(char const* filename) {
