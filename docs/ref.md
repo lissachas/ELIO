@@ -1,6 +1,6 @@
 Compilation:
 rm -rf build
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
 cmake --build build
 ./build/app
 

@@ -106,6 +106,14 @@ export class Lexer {
         }
 };
 
+
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+// I M P L E M E N T A T I O N
+
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+// Stacks our tokens
 void Lexer::start(std::string set) {
     while (!is_at_end()) {
         begin = current;
@@ -116,10 +124,10 @@ void Lexer::start(std::string set) {
     printf("Finished creating tokens \n");
 }
 
+// Just a giant switch case
 Token Lexer::lex() {
     char c = advance();
-    switch (c)
-    {
+    switch (c) {
     case ';': create_token(SEMI); break;
     case '(': create_token(LPAREN); break;
     case ')': create_token(RPAREN); break;
@@ -174,7 +182,9 @@ Token Lexer::lex() {
     }
 }
 
+// Handling strings... 
 void Lexer::string() {
+    // Consume the entire string and check if it ends
     while (peek() != '"' && !is_at_end()) {
         if (peek() == '\n') line++;
         advance();
@@ -188,6 +198,7 @@ void Lexer::string() {
     create_token(STR);
 }
 
+// This doesn't actually check if its an int of a float, so the parser does it
 void Lexer::number() {
     while(is_digit(peek())) advance();
 
@@ -198,11 +209,13 @@ void Lexer::number() {
     create_token(VAL, std::stod(source.substr(begin, current - begin)));
 }
 
+// The last one
 void Lexer::identifier() {
     while (is_alphanum(peek())) advance();
 
     TokenType type = IDENT;
     std::string text = source.substr(begin, current - begin);
+    // Check if its one of our reserved names
     auto it = identmap.find(text);
     if (it != identmap.end()) {
         type = it->second;

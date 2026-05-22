@@ -7,7 +7,7 @@ module;
 export module tokens;
 using Object = std::variant<int, std::string_view, double>;
 
-export typedef enum TokenType {
+export enum TokenType {
     COMMA, //,
     DOT, //.
     SEMI, //;
@@ -59,8 +59,8 @@ export class Token {
 
     public:
     TokenType type;
-    Token() : value{""}, literal{0}, type{END}, line{0} {}
-    Token(std::string_view value, Object literal, TokenType type, int line) : value{value}, literal{literal}, type{type}, line{line} {
+    Token() : literal{0}, line{0}, value{""}, type{END} {}
+    Token(std::string_view value, Object literal, TokenType type, int line) : literal{literal},  line{line}, value{value}, type{type} {
 
     }
     std::string_view get_value() const { return value; }

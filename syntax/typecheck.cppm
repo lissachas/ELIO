@@ -7,6 +7,7 @@ module;
 #include <variant>
 #include <concepts>
 #include <stdexcept>
+#include <memory>
 
 export module typecheck;
 
@@ -18,10 +19,847 @@ import symbol;
 import resolve;
 import expr;
 
+export enum class TypeKind {
+    // Primitives
+    INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FLO32, FLO64, UNIT, BOOL,
+    CHAR, STRING, STRING_VIEW, BUF_STRING,
+
+    // Compounds
+    ARRAY, // inner + size
+    OPTIONAL, // inner
+    RESULT, // inner and inner2
+    SHARED, // inner
+    WEAK, // inner
+    REF, // inner
+    MUTREF, // inner
+
+    // User defined
+    STRUCT,
+
+    // Addon
+    UNKNOWN, // Errors
+    UNIT_ // Returned by statements
+};
+
+export struct Type {
+    TypeKind tkind;
+
+    // Compounds
+    std::shared_ptr<Type> inner = nullptr;
+    std::shared_ptr<Type> inner2 = nullptr;
+    size_t array_size = 0;
+
+    // Struct
+    std::string_view struct_name;
+
+    // Constructors
+    static Type make(TypeKind k) {
+        return Type{k};
+    }
+    static Type make_array(Type elem, size_t n) {
+        Type t{TypeKind::ARRAY};
+        t.inner = std::make_shared<Type>(elem);
+        t.array_size = n;
+        return t;
+    }
+    static Type make_optional(Type inner) {
+        Type t{TypeKind::OPTIONAL};
+        t.inner = std::make_shared<Type>(inner);
+        return t;
+    }
+    static Type make_result(Type inner, Type inner2) {
+        Type t{TypeKind::RESULT};
+        t.inner = std::make_shared<Type>(inner);
+        t.inner2 = std::make_shared<Type>(inner2);
+        return t;
+    }
+    static Type make_shared(Type inner) {
+        Type t{TypeKind::SHARED};
+        t.inner = std::make_shared<Type>(inner);
+        return t;
+    }
+    static Type make_weak(Type inner) {
+        Type t{TypeKind::WEAK};
+        t.inner = std::make_shared<Type>(inner);
+        return t;
+    }
+    static Type make_ref(Type inner) {
+        Type t{TypeKind::REF};
+        t.inner = std::make_shared<Type>(inner);
+        return t;
+    }
+    static Type make_mut_ref(Type inner) {
+        Type t{TypeKind::MUTREF};
+        t.inner = std::make_shared<Type>(inner);
+        return t;
+    }
+};
+
+// Types checking:: comparison order -> Same type -> Struct name -> First inner compound -> Second inner compound -> Array size
+bool types_equal(const Type& a, const Type& b) {
+    if (a.tkind != b.tkind) return false;
+    if (a.tkind == TypeKind::STRUCT) return a.struct_name == b.struct_name;
+    if (a.inner && b.inner && !types_equal(*a.inner, *b.inner)) return false;
+    if (a.inner2 && b.inner2 && !types_equal(*a.inner2, *b.inner2)) return false;
+    if (a.tkind == TypeKind::ARRAY) return a.array_size == b.array_size;
+    return true;
+}
+
 
 export class TypeChecker {
     public:
 
-    private:
 
+    private:
+    std::unordered_map<Node*, Type> type_cache;
+    Error err;
+
+    // Struct field lookup map
+    std::unordered_map<std::string_view, std::unordered_map<std::string_view, Type>> struct_fields;
+    std::unordered_map<std::string_view, Type> fn_return_types;
+    FunctionDecl* current_fn = nullptr;
+    std::unordered_map<std::string_view, Type> var_types;
+    std::vector<Type> current_loop_break_types;
+
+    void set_type(Node* n, Type t) {
+        type_cache[n] = t;
+    }
+    Type get_type(Node* n) {
+        return type_cache.at(n);
+    }
+
+    Type resolve_type_node(TypeNode*);
+    void type_error(Token tok, const std::string& msg, const Type& got, const Type& expected) {
+        err.error(tok.get_line(), std::string(tok.get_value()), msg + ": expected " + type_to_string(expected) + ", got " + type_to_string(got));
+    }
+    std::string type_to_string(const Type& t) {
+        switch (t.tkind) {
+            case TypeKind::INT8:  return "int8";
+            case TypeKind::INT16: return "int16";
+            case TypeKind::INT32: return "int32";
+            case TypeKind::INT64: return "int64";
+            case TypeKind::UINT8:  return "uint8";
+            case TypeKind::UINT16: return "uint16";
+            case TypeKind::UINT32: return "uint32";
+            case TypeKind::UINT64: return "uint64";
+            case TypeKind::FLO32: return "flo32";
+            case TypeKind::FLO64: return "flo64";
+            case TypeKind::BOOL:  return "bool";
+            case TypeKind::UNIT:  return "unit";
+            case TypeKind::CHAR:  return "char";
+            case TypeKind::STRING:  return "string";
+            case TypeKind::STRING_VIEW:  return "string_view";
+            case TypeKind::BUF_STRING:  return "buf_string";
+            case TypeKind::OPTIONAL:
+                return "optional[" + type_to_string(*t.inner) + "]";
+            case TypeKind::RESULT:
+                return "result[" + type_to_string(*t.inner) + ", " + type_to_string(*t.inner2) + "]";
+            case TypeKind::SHARED:
+                return "shared[" + type_to_string(*t.inner) + "]";
+            case TypeKind::WEAK:
+                return "weak[" + type_to_string(*t.inner) + "]";
+            case TypeKind::ARRAY:
+                return "[" + type_to_string(*t.inner) + "; " + std::to_string(t.array_size) + "]";
+            case TypeKind::STRUCT:
+                return std::string(t.struct_name);
+            case TypeKind::UNKNOWN: return "?";
+        }
+    }
+
+    // entry
+    void check(Node* program);
+    Type check_node(Node*);
+
+    // declarations
+    void check_function(FunctionDecl*);
+    void check_struct(StructDecl*);
+    void check_let(LetDecl*);
+    void check_const(ConstDecl*);
+
+    // statements
+    Type check_block(BlockExpr*);
+    void check_expr_stmt(ExprStmt*);
+    void check_if_stmt(IfStmt*);
+    void check_while(WhileStmt*);
+    void check_for(ForStmt*);
+    Type check_loop(LoopStmt*);
+    void check_return(ReturnStmt*);
+    void check_break(BreakStmt*);
+    void check_continue(ContinueStmt*);
+    void check_match_stmt(MatchStmt*);
+
+    // expressions
+    Type check_literal(Literal*);
+    Type check_identifier(Identifier*);
+    Type check_binary(BinaryExpr*);
+    Type check_unary(UnaryExpr*);
+    Type check_call(CallExpr*);
+    Type check_index(IndexExpr*);
+    Type check_field(FieldExpr*);
+    Type check_assign(AssignExpr*);
+    Type check_if_expr(IfExpr*);
+    Type check_match_expr(MatchExpr*);
+    Type check_lambda(LambdaExpr*);
+    Type check_block_expr(BlockExpr*);
+    Type check_struct_init(StructInit*);
+    Type check_builtin(BuiltinCast*);
+
+    // helpers
+    Type check_match_arm(MatchArm*, Type subject_type);
+    void check_pattern(Pattern*, Type subject_type);
+    Type check_of_node(Node*); // read back
+    // All numeric types, also string, bool and char
+    bool is_comparable(TypeKind tk) {
+        if (tk == TypeKind::BOOL || tk == TypeKind::CHAR || tk == TypeKind::STRING || is_numeric(tk)) return true;
+
+        return false;
+    }
+    // All numeric types, char and string
+    bool is_ordered(TypeKind tk) {
+        if (tk == TypeKind::CHAR || tk == TypeKind::STRING || is_numeric(tk)) return true;
+
+        return false;
+    }
+    // Int, Unit, Float
+    bool is_numeric(TypeKind tk) {
+        if (tk == TypeKind::INT8 || tk == TypeKind::INT16 || tk == TypeKind::INT32 || tk == TypeKind::INT64 || tk == TypeKind::UINT8 || tk == TypeKind::UINT16 || tk == TypeKind::UINT32 || tk == TypeKind::UINT64 || tk == TypeKind::FLO32 || tk == TypeKind::FLO64) return true;
+
+        return false;
+    }
+
+    bool is_integer(TypeKind tk) {
+        switch (tk) {
+            case TypeKind::INT8:  case TypeKind::INT16:
+            case TypeKind::INT32: case TypeKind::INT64:
+            case TypeKind::UINT8: case TypeKind::UINT16:
+            case TypeKind::UINT32: case TypeKind::UINT64:
+                return true;
+            default: return false;
+        }
+}
+    // All primitives plus compounds with copyable types inside. Not string, buf_string, shared or weak
+    bool is_copyable(TypeKind tk) {
+        if (is_numeric(tk) || tk == TypeKind::BOOL || tk == TypeKind::UNIT || tk == TypeKind::CHAR) return true;
+
+        return true;
+    }
+    // Move semantics is for codegen lol
+    bool is_movable(TypeKind);
+    // All numerics and maybe string concatenation? (add later)
+    bool is_addable(TypeKind);
+    Type unknown(Node* node) {
+        Type t = Type::make(TypeKind::UNKNOWN);
+        set_type(node, t);
+        return t;
+    }
 };
+
+// Start by resolving all types
+Type TypeChecker::resolve_type_node(TypeNode* tn) {
+    switch (tn->type_type) {
+        case TypeType::Primitive:
+            switch (tn->name.type) {
+                case INT8: return Type::make(TypeKind::INT8);
+                case INT16: return Type::make(TypeKind::INT16);
+                case INT32: return Type::make(TypeKind::INT32);
+                case INT64: return Type::make(TypeKind::INT64);
+                case UINT8: return Type::make(TypeKind::UINT8);
+                case UINT16: return Type::make(TypeKind::UINT16);
+                case UINT32: return Type::make(TypeKind::UINT32);
+                case UINT64: return Type::make(TypeKind::UINT64);
+                case FLO32: return Type::make(TypeKind::FLO32);
+                case FLO64: return Type::make(TypeKind::FLO64);
+                case BOOL: return Type::make(TypeKind::BOOL);
+                case UNIT: return Type::make(TypeKind::UNIT);
+                case CHAR: return Type::make(TypeKind::CHAR);
+                case STRING: return Type::make(TypeKind::STRING);
+                case STRING_VIEW: return Type::make(TypeKind::STRING_VIEW);
+                case BUF_STRING: return Type::make(TypeKind::BUF_STRING);
+            }
+        case TypeType::Optional: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            return Type::make_optional(inner);
+        }
+        case TypeType::Result: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            Type inner2 = resolve_type_node(static_cast<TypeNode*>(tn->inner2));
+            return Type::make_result(inner, inner2);
+        }
+        case TypeType::Shared: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            return Type::make_shared(inner);
+        }
+        case TypeType::Weak: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            return Type::make_weak(inner);
+        }
+        case TypeType::Ref: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            return Type::make_ref(inner);
+        }
+        case TypeType::RefMut: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            return Type::make_mut_ref(inner);
+        }
+        case TypeType::Named: {
+            
+            
+        }
+
+        case TypeType::Array: {
+            Type inner = resolve_type_node(static_cast<TypeNode*>(tn->inner));
+            size_t n = tn->array_size;
+            return Type::make_array(inner, n);
+        }
+    }
+}
+
+// #################################################
+
+// M A I N
+
+// )))))))))))))))))))))))))))))))))))))))))))))))))
+
+void TypeChecker::check(Node* program) {
+    // pre-pass
+    auto* root = static_cast<BlockExpr*>(program);
+
+    // register struct fields
+    for (Node* item: root->opt) {
+        if (item->type == NodeType::StructDecl)
+            check_struct(static_cast<StructDecl*>(item));
+    }
+
+    // pre-pass 2: register function signatures
+    for (Node* item : root->opt) {
+        if (item->type == NodeType::FunctionDecl) {
+            auto* fn = static_cast<FunctionDecl*>(item);
+            fn_return_types[fn->name.get_value()] = resolve_type_node(static_cast<TypeNode*>(fn->ret_type));
+        }
+    }
+
+    // main pass
+    for (Node* item : root->opt)
+        check_node(item);
+}
+
+Type TypeChecker::check_node(Node* node) {
+    if (!node) return Type::make(TypeKind::UNIT_);
+    switch (node->type) {
+        case NodeType::Literal:    return check_literal(static_cast<Literal*>(node));
+        case NodeType::BinaryExpr: return check_binary(static_cast<BinaryExpr*>(node));
+        case NodeType::Identifier: return check_identifier(static_cast<Identifier*>(node));
+        case NodeType::BlockExpr:  return check_block(static_cast<BlockExpr*>(node));
+        case NodeType::LetDecl:    check_let(static_cast<LetDecl*>(node));
+                                return Type::make(TypeKind::UNIT_);
+    }
+}
+
+
+// 11111111111111111111111111111111111111111111111111
+
+// D E C L A R A T I O N S
+
+// 22222222222222222222222222222222222222222222222222
+
+void TypeChecker::check_function(FunctionDecl* node) {
+    FunctionDecl* enclosing = current_fn;
+    current_fn = node;
+    
+    if (node->body) 
+        check_node(node->body);
+    current_fn = enclosing;
+}
+
+void TypeChecker::check_struct(StructDecl* node) {
+    std::unordered_map<std::string_view, Type> fields;
+    for (Node* s: node->opt) {
+        auto* fd = static_cast<FieldDecl*>(s);
+        fields[fd->name.get_value()] = resolve_type_node(static_cast<TypeNode*>(fd->type_ann));
+    }
+    struct_fields[node->tag.get_value()] = std::move(fields);
+}
+
+void TypeChecker::check_let(LetDecl* node) {
+    Type init_type = check_node(node->init);
+
+    if (node->type_ann) {
+        Type declared = resolve_type_node(static_cast<TypeNode*>(node->type_ann));
+        if (!types_equal(init_type, declared))
+            err.error(0, "let", "Initializer type does not match declared type");
+    }
+
+    auto* pat = static_cast<Pattern*>(node->pattern);
+    if (pat->pat_type == PatternType::Identifier)
+        var_types[pat->name.get_value()] = node->type_ann ? resolve_type_node(static_cast<TypeNode*>(node->type_ann)) : init_type;
+}
+
+void TypeChecker::check_const(ConstDecl* node) {
+    Type init_type = check_node(node->init);
+
+    if (node->type_ann) {
+        Type declared = resolve_type_node(static_cast<TypeNode*>(node->type_ann));
+        if (!types_equal(init_type, declared))
+            err.error(0, "const", "Initializer type does not match declared type");
+    }
+
+    Token ident = node->ident;
+    
+}
+
+// ======================================================
+
+// S T A T E M E N T S
+
+// =====================================================
+
+Type TypeChecker::check_block(BlockExpr* node) {
+    Type last = Type::make(TypeKind::UNIT_);
+    for (Node* s : node->opt)
+        last = check_node(s);
+    set_type(node, last);
+    return last;
+}
+
+
+void TypeChecker::check_expr_stmt(ExprStmt* node) {
+    check_node(node->node);
+}
+
+void TypeChecker::check_if_stmt(IfStmt* node) {
+    Type condition = check_node(node->node);
+    if (condition.tkind != TypeKind::BOOL && condition.tkind != TypeKind::UNKNOWN)
+        err.error(0, "if", "Condition must be bool");
+    check_node(node->block);
+    if (node->other) check_node(node->other);
+}
+
+void TypeChecker::check_while(WhileStmt* node) {
+    Type condition = check_node(node->condition);
+    if (condition.tkind != TypeKind::BOOL && condition.tkind != TypeKind::UNKNOWN)
+        err.error(0, "while", "Condition must be bool");
+    check_node(node->block);
+}
+
+void TypeChecker::check_for(ForStmt* node) {
+    Type iter = check_node(node->node);
+    if (iter.tkind != TypeKind::ARRAY && iter.tkind != TypeKind::UNKNOWN)
+        err.error(0, "for", "for-in requires array type");
+
+    if (iter.tkind == TypeKind::ARRAY && iter.inner) {
+        auto* pat = static_cast<Pattern*>(node->pattern);
+        if (pat->pat_type == PatternType::Identifier)
+            var_types[pat->name.get_value()] = *iter.inner;
+    }
+
+    check_node(node->block);
+}
+
+Type TypeChecker::check_loop(LoopStmt* node) {
+    auto saved = current_loop_break_types;
+    current_loop_break_types.clear();
+
+    check_node(node->block);
+
+    Type result = Type::make(TypeKind::UNIT);
+    for (auto& bt : current_loop_break_types) {
+        if (result.tkind == TypeKind::UNIT) {
+            result = bt;
+            continue;
+        }
+        if (!types_equal(result, bt))
+            err.error(0, "loop", "break values have inconsistent types");
+    }
+
+    current_loop_break_types = saved;
+    set_type(node, result);
+    return result;
+}
+
+void TypeChecker::check_return(ReturnStmt* node) {
+    if (!current_fn) return;
+
+    Type declared = resolve_type_node(static_cast<TypeNode*>(current_fn->ret_type));
+
+    if (!node->has_value) {
+        if (declared.tkind != TypeKind::UNIT)
+            err.error(0, "return", "Missing return value");
+        return;
+    }
+
+    Type actual = check_node(node->value);
+    if (actual.tkind == TypeKind::UNKNOWN) return;
+    if (!types_equal(actual, declared))
+        err.error(0, "return", "Return type mismatch: expected " +
+                  type_to_string(declared) + ", got " + type_to_string(actual));
+}
+
+void TypeChecker::check_break(BreakStmt* node) {
+    if (node->has_value) {
+        Type t = check_node(node->value);
+        current_loop_break_types.push_back(t);
+    }
+}
+
+void TypeChecker::check_continue(ContinueStmt* node) {
+    // pass
+}
+
+void TypeChecker::check_match_stmt(MatchStmt* node) {
+    Type subject = check_node(node->subject);
+    for (Node* arm : node->arms) 
+        check_match_arm(static_cast<MatchArm*>(arm), subject);
+}
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+// E X P R E S S I O N S
+
+// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Type TypeChecker::check_literal(Literal* node) {
+    Type t;
+    switch (node->literal) {
+        case LiteralType::BoolLiteral: t = Type::make(TypeKind::BOOL); break;
+        case LiteralType::UnitLiteral: t = Type::make(TypeKind::UNIT); break;
+        case LiteralType::IntLiteral: t = Type::make(TypeKind::INT32); break;
+        case LiteralType::FloatLiteral: t = Type::make(TypeKind::FLO64); break;
+        case LiteralType::StringLiteral: t = Type::make(TypeKind::STRING); break;
+        case LiteralType::CharLiteral: t = Type::make(TypeKind::CHAR); break;
+    }
+    set_type(node, t);
+    return t;
+}
+
+Type TypeChecker::check_identifier(Identifier* node) {
+    auto it = var_types.find(node->token.get_value());
+    if (it == var_types.end()) {
+        return unknown(node);
+    }
+    set_type(node, it->second);
+    return it->second;
+}
+
+Type TypeChecker::check_binary(BinaryExpr* node) {
+    Type left = check_node(node->left);
+    Type right = check_node(node->right);
+
+    // Error if not equal
+    if (!types_equal(left, right)) {
+        type_error(node->op, "Binary operands must have the same type", left, right);
+        set_type(node, Type::make(TypeKind::UNKNOWN));
+        return Type::make(TypeKind::UNKNOWN);
+    }
+
+    Type result;
+    TokenType op = node->op.type;
+
+    if (op == EQUAL_EQUAL || op == BANG_EQUAL) {
+        result = Type::make(TypeKind::BOOL);
+    } else if (op == LESS || op == LESS_EQUAL || op == GREATER || op == GREATER_EQUAL) {
+        if (!is_comparable(left.tkind)) {
+            err.error(node->op.get_line(), std::string(node->op.get_value()),
+                      "This type doesn't support comparison");
+            result = Type::make(TypeKind::UNKNOWN);
+        } else {
+            result = Type::make(TypeKind::BOOL);
+        }
+    } else {
+        if (!is_numeric(left.tkind)) {
+            err.error(node->op.get_line(), std::string(node->op.get_value()),
+                      "Arithmetic requires numeric types");
+            result = Type::make(TypeKind::UNKNOWN);
+        } else {
+            result = left;
+        }
+    }
+
+    set_type(node, result);
+    return result;
+}
+
+Type TypeChecker::check_if_expr(IfExpr* node) {
+    Type condition = check_node(node->condition);
+    if (condition.tkind == TypeKind::UNKNOWN)
+        return unknown(node);
+
+    if (condition.tkind != TypeKind::BOOL) 
+        err.error(0, "if", "Condition must be bool");
+
+    Type then_t = check_node(node->then_block);
+
+    if (!node->else_expr) {
+        set_type(node, Type::make(TypeKind::UNIT));
+        return Type::make(TypeKind::UNIT);
+    }
+
+    Type else_t = check_node(node->else_expr);
+
+    if (!types_equal(then_t, else_t)) {
+        err.error(0, "if", "if expression branches must have same type: got " +
+                type_to_string(then_t) + " and " + type_to_string(else_t));
+        return unknown(node);
+    }
+
+    set_type(node, then_t);
+    return then_t;
+}
+
+Type TypeChecker::check_unary(UnaryExpr* node) {
+    Type operand = check_node(node->operand);
+    if (operand.tkind == TypeKind::UNKNOWN) return unknown(node);
+
+    Type result;
+    TokenType op = node->op.type;
+    if (op == BANG) {
+        if (operand.tkind == TypeKind::BOOL) {
+            err.error(node->op.get_line(), "!", "Logical not requires bool");
+        } else {
+            result = Type::make(TypeKind::BOOL);
+        }
+    } else if (op == MINUS) {
+        if (is_numeric(operand.tkind)) {
+            err.error(node->op.get_line(), "-", "Unary minus requires numeric type");
+        } else {
+            result = operand;
+        }
+    } else if (op == AMP) {
+        result = Type::make_ref(operand);
+    } else if (op == STAR) {
+        if (operand.tkind != TypeKind::REF && operand.tkind != TypeKind::MUTREF) {
+            err.error(node->op.get_line(), "*", "Dereference requires reference type");
+            return unknown(node);
+        }
+        else result = *operand.inner;
+    } else return unknown(node);
+
+    set_type(node, result);
+    return result;
+}
+
+Type TypeChecker::check_call(CallExpr* node) {
+    if (node->callee->type != NodeType::Identifier)
+        return unknown(node);
+
+    auto* id = static_cast<Identifier*>(node->callee);
+    auto* fn = static_cast<FunctionDecl*>(id->resolved);
+    if (!fn) return unknown(node);
+
+    // check arg count
+    if (node->args.size() != fn->params.size()) {
+        err.error(id->token.get_line(), std::string(id->token.get_value()),
+                  "Expected " + std::to_string(fn->params.size()) +
+                  " arguments, got " + std::to_string(node->args.size()));
+        return unknown(node);
+    }
+
+    // each arg against param
+    for (size_t i = 0; i < node->args.size(); i++) {
+        Type arg_t = check_node(node->args[i]);
+        auto* param = static_cast<Param*>(fn->params[i]);
+        Type param_t = resolve_type_node(static_cast<TypeNode*>(param->type_ann));
+        if (arg_t.tkind != TypeKind::UNKNOWN && !types_equal(arg_t, param_t))
+            err.error(0, "call", "Argument " + std::to_string(i+1) +
+                      " type mismatch: expected " + type_to_string(param_t) +
+                      ", got " + type_to_string(arg_t));
+    
+    }
+
+    Type ret = resolve_type_node(static_cast<TypeNode*>(fn->ret_type));
+    set_type(node, ret);
+    return ret;
+}
+
+Type TypeChecker::check_index(IndexExpr* node) {
+    Type arr = check_node(node->node);
+    Type idx = check_node(node->index);
+    if (arr.tkind == TypeKind::UNKNOWN) return unknown(node);
+
+    if (arr.tkind != TypeKind::ARRAY) {
+        err.error(0, "[]", "Index requires array type, got " + type_to_string(arr));
+        return unknown(node);
+    }
+
+    if (!is_integer(idx.tkind) && idx.tkind != TypeKind::UNKNOWN)
+        err.error(0, "[]", "Index must be integer type, got " + type_to_string(idx));
+
+    Type elem = *arr.inner;
+    set_type(node, elem);
+    return elem;
+}
+
+Type TypeChecker::check_field(FieldExpr* node) {
+    Type object = check_node(node->object);
+    if (object.tkind == TypeKind::UNKNOWN) 
+        return unknown(node);
+
+    if (object.tkind != TypeKind::STRUCT) {
+        err.error(node->field.get_line(), std::string(node->field.get_value()),
+                  "Field access on non-struct type " + type_to_string(object));
+        return unknown(node);
+    }
+
+    auto sit = struct_fields.find(object.struct_name);
+    if (sit == struct_fields.end()) return unknown(node);
+
+    auto fit = sit->second.find(node->field.get_value());
+    if (fit == sit->second.end()) {
+        err.error(node->field.get_line(), std::string(node->field.get_value()),
+                  "No field '" + std::string(node->field.get_value()) +
+                  "' on struct " + std::string(object.struct_name));
+        return unknown(node);
+    }
+
+    set_type(node, fit->second);
+    return fit->second;
+}
+
+Type TypeChecker::check_assign(AssignExpr* node) {
+    Type target = check_node(node->target);
+    Type value  = check_node(node->value);
+    if (target.tkind == TypeKind::UNKNOWN || value.tkind == TypeKind::UNKNOWN)
+        return unknown(node);
+
+    if (!types_equal(target, value))
+        err.error(0, "=", "Cannot assign " + type_to_string(value) +
+                  " to " + type_to_string(target));
+
+    Type result = Type::make(TypeKind::UNIT);
+    set_type(node, result);
+    return result;
+}
+
+Type TypeChecker::check_match_expr(MatchExpr* node) {
+    Type subject = check_node(node->subject);
+    Type result = Type::make(TypeKind::UNKNOWN);
+
+    for (Node* arm : node->arms) {
+        Type arm_t = check_match_arm(static_cast<MatchArm*>(arm), subject);
+        if (arm_t.tkind == TypeKind::UNKNOWN) continue;
+        if (result.tkind == TypeKind::UNKNOWN) { 
+            result = arm_t; 
+            continue; 
+        }
+        if (!types_equal(result, arm_t))
+            err.error(0, "match", "match arms have inconsistent types");
+    }
+
+    set_type(node, result);
+    return result;
+}
+
+Type TypeChecker::check_match_arm(MatchArm* arm, Type subject_type) {
+    check_pattern(static_cast<Pattern*>(arm->pattern), subject_type);
+    Type body_t = check_node(arm->body);
+    set_type(arm, body_t);
+    return body_t;
+}
+
+void TypeChecker::check_pattern(Pattern* pat, Type subject) {
+    switch (pat->pat_type) {
+        case PatternType::Wildcard:
+        case PatternType::Identifier:
+            if (pat->pat_type == PatternType::Identifier)
+                var_types[pat->name.get_value()] = subject;
+            break;
+        case PatternType::Some:
+        if (subject.tkind != TypeKind::OPTIONAL && subject.tkind != TypeKind::UNKNOWN)
+            err.error(0, "some", "some() pattern requires optional type");
+        if (pat->inner && subject.inner)
+            check_pattern(static_cast<Pattern*>(pat->inner), *subject.inner);
+        break;
+        case PatternType::Ok:
+        if (subject.tkind != TypeKind::RESULT && subject.tkind != TypeKind::UNKNOWN)
+            err.error(0, "ok", "ok() pattern requires result type");
+        if (pat->inner && subject.inner)
+            check_pattern(static_cast<Pattern*>(pat->inner), *subject.inner);
+        break;
+        case PatternType::Err:
+        if (subject.tkind != TypeKind::RESULT && subject.tkind != TypeKind::UNKNOWN)
+            err.error(0, "err", "err() pattern requires result type");
+        if (pat->inner && subject.inner2)
+            check_pattern(static_cast<Pattern*>(pat->inner), *subject.inner2);
+        break;
+        case PatternType::None:
+        if (subject.tkind != TypeKind::OPTIONAL && subject.tkind != TypeKind::UNKNOWN)
+            err.error(0, "none", "none pattern requires optional type");
+        break;
+        default: break;
+    }
+}
+
+Type TypeChecker::check_struct_init(StructInit* node) {
+    auto sit = struct_fields.find(node->name.get_value());
+    if (sit == struct_fields.end()) {
+        err.error(node->name.get_line(), std::string(node->name.get_value()),
+                  "Unknown struct type");
+        return unknown(node);
+    }
+
+    for (Node* f : node->opt) {
+        auto* fi = static_cast<FieldInit*>(f);
+        auto fit = sit->second.find(fi->name.get_value());
+        if (fit == sit->second.end()) {
+            err.error(fi->name.get_line(), std::string(fi->name.get_value()),
+                      "No field '" + std::string(fi->name.get_value()) +
+                      "' on struct " + std::string(node->name.get_value()));
+            continue;
+        }
+        if (!fi->shorthand) {
+            Type val_t = check_node(fi->value);
+            if (val_t.tkind != TypeKind::UNKNOWN && !types_equal(val_t, fit->second))
+                err.error(fi->name.get_line(), std::string(fi->name.get_value()),
+                          "Field type mismatch");
+        } else {
+            // shorthand: variable name == field name, look up var type
+            auto vit = var_types.find(fi->name.get_value());
+            if (vit != var_types.end() && !types_equal(vit->second, fit->second))
+                err.error(fi->name.get_line(), std::string(fi->name.get_value()),
+                          "Shorthand field type mismatch");
+        }
+    }
+
+    Type result;
+    result.tkind = TypeKind::STRUCT;
+    result.struct_name = node->name.get_value();
+    set_type(node, result);
+    return result;
+}
+
+Type TypeChecker::check_builtin(BuiltinCast* node) {
+    Type first = check_node(node->first);
+
+    switch (node->builtin.type) {
+    case SIGN:   // unsign -> sign, same width
+        if (first.tkind == TypeKind::UNKNOWN) return unknown(node);
+        // e.g. uint32 -> int32
+        // for now just check it's numeric and return UNKNOWN until you map widths
+        if (!is_integer(first.tkind))
+            err.error(node->builtin.get_line(), "sign", "sign() requires integer type");
+        // TODO: map uint->int of same width
+        return unknown(node); // replace with correct mapped type
+    case TRUNC_CAST:
+    case CHECK_CAST: {
+        Type target = resolve_type_node(static_cast<TypeNode*>(node->type_arg));
+        if (!is_numeric(first.tkind) || !is_numeric(target.tkind))
+            err.error(node->builtin.get_line(), "cast", "cast requires numeric types");
+        set_type(node, target);
+        return target;
+    }
+    case WRAP_ADD: case WRAP_SUB: case WRAP_MUL: {
+        Type second = check_node(node->second);
+        if (!types_equal(first, second))
+            err.error(node->builtin.get_line(), "wrap", "wrap operands must have same type");
+        if (!is_integer(first.tkind))
+            err.error(node->builtin.get_line(), "wrap", "wrap requires integer type");
+        set_type(node, first);
+        return first;
+    }
+    default: return unknown(node);
+    }
+}
+
+Type TypeChecker::check_lambda(LambdaExpr* node) {
+    check_node(node->node);
+    return unknown(node); 
+}

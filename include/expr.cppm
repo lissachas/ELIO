@@ -1,10 +1,6 @@
 module;
 
-#include <string>
-#include <unordered_map>
-#include <string_view>
 #include <vector>
-#include <variant>
 
 export module expr;
 
@@ -13,6 +9,7 @@ import error;
 
 export {
 
+// Arena initialization
 struct Arena {
     std::vector<std::byte> buf;
     size_t offset = 0;
@@ -25,6 +22,7 @@ struct Arena {
     }
 };
 
+// All nodes
 enum class NodeType {
     // Expressions
     Literal, Identifier, BinaryExpr, UnaryExpr, CallExpr, IndexExpr, FieldExpr, AssignExpr, IfExpr, MatchExpr, LambdaExpr, BlockExpr, StructInit, BuiltInCast,
@@ -82,6 +80,7 @@ struct Literal: Node {
 
 struct Identifier: Node {
     Token token;
+    Node* resolved = nullptr; // For resolver
 };
 
 // EXPRESSIONS
@@ -204,6 +203,8 @@ struct ContinueStmt : Node {
 
 struct BreakStmt : Node {
     bool has_value;
+    bool has_tag;
+    Token tag;
     Node* value;
 };
 

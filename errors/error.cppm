@@ -2,6 +2,7 @@ module;
 
 #include <string>
 export module error;
+
 export class Error {
     public: 
         void error(int line, std::string where, std::string message);

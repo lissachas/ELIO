@@ -43,4 +43,7 @@ target_sources(elio PUBLIC
         errors/error.cppm
         include/lexer.cppm
         include/parser.cppm
+        syntax/resolve.cppm
+        syntax/symbol.cppm
+        syntax/typecheck.cppm
 )

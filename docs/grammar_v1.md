@@ -137,7 +137,7 @@
                   | "continue" <identifier> ";"
 
 <break_stmt> ::= "break" ";"
-               | "break" <expr> ";"
+               | "break" <expr> ";" // break with expr 
                | "break" <identifier> ";"
                | "break" <identifier> <expr> ";"
 

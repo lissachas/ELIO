@@ -1,11 +1,10 @@
 module;
 #include <string>
-#include <unordered_map>
 #include <string_view>
 #include <vector>
-#include <variant>
 #include <concepts>
 #include <stdexcept>
+#include <variant>
 
 export module parser;
 import lexer;
@@ -79,6 +78,7 @@ export class Parser {
         }
     }
 
+    // Declarations
     Node* parse_type();
     Node* parse_literal();
     Node* parse_pattern();
@@ -148,6 +148,7 @@ Node* Parser::parse() {
     
     return node;
 }
+
 
 Node* Parser::parse_item() {
     if (match(FN)) return parse_function_decl();
@@ -840,10 +841,36 @@ Node* Parser::parse_type() {
         expect(RSQUARE, "Expected ']'");
         return node;
     }
-    if (match(OPTIONAL)) { node->type_type = TypeType::Optional; expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
-    if (match(RESULT))   { node->type_type = TypeType::Result;   expect(LSQUARE,"["); node->inner = parse_type(); expect(COMMA,","); node->inner2 = parse_type(); expect(RSQUARE,"]"); return node; }
-    if (match(SHARED))   { node->type_type = TypeType::Shared;   expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
-    if (match(WEAK))     { node->type_type = TypeType::Weak;     expect(LSQUARE,"["); node->inner = parse_type(); expect(RSQUARE,"]"); return node; }
+    if (match(OPTIONAL)) { 
+        node->type_type = TypeType::Optional; 
+        expect(LSQUARE,"["); 
+        node->inner = parse_type(); 
+        expect(RSQUARE,"]"); 
+        return node; 
+    }
+    if (match(RESULT))   { 
+        node->type_type = TypeType::Result;   
+        expect(LSQUARE,"["); 
+        node->inner = parse_type(); 
+        expect(COMMA,","); 
+        node->inner2 = parse_type(); 
+        expect(RSQUARE,"]"); 
+        return node; 
+    }
+    if (match(SHARED))   { 
+        node->type_type = TypeType::Shared;   
+        expect(LSQUARE,"["); 
+        node->inner = parse_type(); 
+        expect(RSQUARE,"]"); 
+        return node; 
+    }
+    if (match(WEAK))     { 
+        node->type_type = TypeType::Weak;     
+        expect(LSQUARE,"["); 
+        node->inner = parse_type(); 
+        expect(RSQUARE,"]"); 
+        return node; 
+    }
 
     if (match(BOOL,UNIT,INT8,INT16,INT32,INT64,UINT8,UINT16,UINT32,UINT64,FLO32,FLO64,CHAR,STRING,STRING_VIEW,BUF_STRING)) {
         node->type_type = TypeType::Primitive;
