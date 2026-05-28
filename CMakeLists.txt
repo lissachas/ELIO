@@ -17,10 +17,25 @@ target_include_directories(elio
     PRIVATE include
     PRIVATE errors
     PRIVATE syntax
+    PRIVATE codegen
 
 )
 
 find_package(LLVM REQUIRED CONFIG)
+
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+include_directories(${LLVM_INCLUDE_DIRS})
+add_definitions(${LLVM_DEFINITIONS})
+
+llvm_map_components_to_libnames(llvm_libs
+    core
+    support
+    irreader
+    passes
+    x86codegen
+    x86asmparser
+    x86info
+)
 
 target_link_libraries(elio ${llvm_libs})
 
@@ -46,4 +61,5 @@ target_sources(elio PUBLIC
         syntax/resolve.cppm
         syntax/symbol.cppm
         syntax/typecheck.cppm
+        codegen/codegen.cppm
 )

@@ -1,6 +1,8 @@
 Compilation:
 rm -rf build
 cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
+
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DLLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm
 cmake --build build
 ./build/app
 
@@ -8,6 +10,9 @@ git add .
 git commit -m "Parser fully done"
 git push
 
+git add .
+git commit -m "refactor: migrate to C++23 modules"
+git push origin modules
 
 2. Reference counting / ARC
 

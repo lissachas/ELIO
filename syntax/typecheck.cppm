@@ -108,7 +108,12 @@ bool types_equal(const Type& a, const Type& b) {
 
 export class TypeChecker {
     public:
-
+    void run(Node* program) { 
+        check(program); 
+    }
+    Type query_type(Node* n) { 
+        return type_cache.count(n) ? type_cache.at(n) : Type::make(TypeKind::UNKNOWN); 
+    }
 
     private:
     std::unordered_map<Node*, Type> type_cache;
