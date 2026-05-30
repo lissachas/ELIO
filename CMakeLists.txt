@@ -62,4 +62,5 @@ target_sources(elio PUBLIC
         syntax/symbol.cppm
         syntax/typecheck.cppm
         codegen/codegen.cppm
+        codegen/codegen_v2.cppm
 )

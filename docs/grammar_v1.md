@@ -137,9 +137,9 @@
                   | "continue" <identifier> ";"
 
 <break_stmt> ::= "break" ";"
-               | "break" <expr> ";" // break with expr 
+               | "break" "with" <expr> ";" // break with expr 
                | "break" <identifier> ";"
-               | "break" <identifier> <expr> ";"
+               | "break" <identifier> "with" <expr> ";"
 
 # Match
 

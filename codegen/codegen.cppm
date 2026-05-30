@@ -16,6 +16,14 @@ module;
 #include <string>
 #include <string_view>
 #include <cstddef>
+#include <cassert>
+#include <llvm-19/llvm/Analysis/CGSCCPassManager.h>
+#include <llvm-19/llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm-19/llvm/IR/PassManager.h>
+#include <llvm-19/llvm/Passes/OptimizationLevel.h>
+#include <system_error>
+#include <llvm-19/llvm/IR/Constants.h>
+#include <llvm-19/llvm/IR/Instructions.h>
 
 export module codegen;
 
@@ -36,7 +44,7 @@ export class Codegen {
     void set_type_checker(TypeChecker* tc) {
         tchecker = tc;
     }
-    
+
 
     private:
     std::unique_ptr<llvm::LLVMContext> context; // First create unique Context object to tie whole code generation together. Use Context to get access to LLVM data structures like modules and IRBuilder objects
@@ -48,15 +56,22 @@ export class Codegen {
     std::unordered_map<std::string_view, llvm::StructType*>  struct_type_map;
     std::unordered_map<std::string_view, llvm::Function*>  fn_map;
     std::unordered_map<std::string_view, llvm::Value*> var_map;
+    // field_map[struct_name][field_name] = positional index inside the StructType
     std::unordered_map<std::string_view, std::unordered_map<std::string_view, unsigned>> field_map;
 
-    void save_entry() {
+    // Loop context
+    llvm::BasicBlock* loop_exit_bb = nullptr;
+    llvm::BasicBlock* loop_continue_bb = nullptr;
 
+    std::unordered_map<std::string_view, llvm::Value*> save_scope() {
+        return var_map;
     }
 
-    void restore_entry() {
-
+    void restore_scope(std::unordered_map<std::string_view, llvm::Value*> saved) {
+        var_map = std::move(saved);
     }
+
+    // Type helpers
     bool is_signed_int(TypeKind tkind) {
         return (tkind == TypeKind::INT8) || (tkind == TypeKind::INT16) || (tkind == TypeKind::INT32) || (tkind == TypeKind::INT64);
     }
@@ -66,10 +81,13 @@ export class Codegen {
     bool is_unsigned_int(TypeKind tkind) {
         return (tkind == TypeKind::UINT8) || (tkind == TypeKind::UINT16) || (tkind == TypeKind::UINT32) || (tkind == TypeKind::UINT64);
     }
+    bool is_integer(TypeKind tkind) {
+        return is_signed_int(tkind) || is_unsigned_int(tkind) || tkind == TypeKind::BOOL || tkind == TypeKind::CHAR;
+    }
 
     // Main dispatch
 
-    
+
     llvm::Value* gen_function(FunctionDecl*);
     llvm::Value* gen_block(BlockExpr*);
     llvm::Value* gen_let(LetDecl*);
@@ -80,15 +98,98 @@ export class Codegen {
     llvm::Value* gen_call(CallExpr*);
     llvm::Value* gen_if(IfStmt*);
     llvm::Value* gen_while(WhileStmt*);
+    llvm::Value* gen_loop(LoopStmt*);
     llvm::Value* gen_assign(AssignExpr*);
     llvm::Value* gen_struct_decl(StructDecl*);
     llvm::Value* gen_struct_init(StructInit*);
     llvm::Value* gen_field(FieldExpr*);
+    llvm::Value* gen_break(BreakStmt*);
+    llvm::Value* gen_continue(ContinueStmt*);
 
+    llvm::Value* gen_lvalue(Node* node);
     llvm::Value* gen_node(Node*);
     llvm::Type* llvm_type(const Type&);
 };
 
+
+// -----------------------------------------------------
+
+// M A I N D I S P A T C H
+
+// -----------------------------------------------------
+
+// Passess -> Structs -> Function signatures -> Bodies
+void Codegen::generate(Node* program) {
+    assert(tchecker && "call set_type_checker() before generate");
+    auto* root = static_cast<BlockExpr*>(program);
+
+    // Pass 1: register all struct layouts
+    for (Node* n : root->opt) {
+        if (n->type == NodeType::StructDecl)
+            gen_struct_decl(static_cast<StructDecl*>(n));
+    }
+
+    // Pass 2: register all function signatures
+    for (Node* n : root->opt) {
+        if (n->type != NodeType::FunctionDecl) continue;
+        auto* fd = static_cast<FunctionDecl*>(n);
+
+        std::vector<llvm::Type*> param_types;
+        for (Node* p : fd->params) {
+            auto* param = static_cast<Param*>(p);
+            Type t = tchecker->query_type(param->type_ann ? param->type_ann : param);
+            param_types.push_back(llvm_type(t));
+        }
+        Type ret_t = tchecker->query_type(fd->ret_type ? fd->ret_type : fd);
+        auto* fn_type = llvm::FunctionType::get(llvm_type(ret_t), param_types, false);
+        // Linkage determines how symbols are visible to the linker and how they are merged during the linking process
+        auto* fn = llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, std::string(fd->name.get_value()), *_module);
+        fn_map[fd->name.get_value()] = fn;
+    }
+
+    // Pass 3: generate function bodies
+    for (Node* n : root->opt) {
+        if (n->type == NodeType::FunctionDecl)
+            gen_function(static_cast<FunctionDecl*>(n));
+    }
+}
+
+
+// verify -> optimize -> write .ll file
+void Codegen::emit_ir(const std::string& path) {
+    std::string err_str;
+    llvm::raw_string_ostream err_os(err_str);
+    if (llvm::verifyModule(*_module, &err_os)) {
+        llvm::errs() << "IR verification failed:\n" << err_str << "\n";
+        return;
+    }
+
+    llvm::PassBuilder pb;
+    llvm::LoopAnalysisManager lam;
+    llvm::FunctionAnalysisManager fam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
+    pb.registerModuleAnalyses(mam);
+    pb.registerCGSCCAnalyses(cgam);
+    pb.registerFunctionAnalyses(fam);
+    pb.registerLoopAnalyses(lam);
+    pb.crossRegisterProxies(lam, fam, cgam, mam);
+    auto mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1);
+    mpm.run(*_module, mam);
+
+    std::error_code ec;
+    //llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OpenFlags);
+    if (ec) {
+        llvm::errs() << "Cannot open output: " << ec.message() << "\n";
+        return;
+    }
+   // _module->print(out, nullptr);
+}
+
+
+
+
+// Central dispatch
 llvm::Value* Codegen::gen_node(Node* node) {
     if (!node) return nullptr;
     switch (node->type) {
@@ -102,7 +203,13 @@ llvm::Value* Codegen::gen_node(Node* node) {
         case NodeType::CallExpr:     return gen_call(static_cast<CallExpr*>(node));
         case NodeType::IfStmt:       return gen_if(static_cast<IfStmt*>(node));
         case NodeType::WhileStmt:    return gen_while(static_cast<WhileStmt*>(node));
+        case NodeType::LoopStmt:     return gen_loop(static_cast<LoopStmt*>(node));
         case NodeType::AssignExpr:   return gen_assign(static_cast<AssignExpr*>(node));
+        case NodeType::StructDecl:   return gen_struct_decl(static_cast<StructDecl*>(node));
+        case NodeType::StructInit:   return gen_struct_init(static_cast<StructInit*>(node));
+        case NodeType::FieldExpr:    return gen_field(static_cast<FieldExpr*>(node));
+        case NodeType::BreakStmt:    return gen_break(static_cast<BreakStmt*>(node));
+        case NodeType::ContinueStmt: return gen_continue(static_cast<ContinueStmt*>(node));
         case NodeType::ExprStmt: {
             auto* es = static_cast<ExprStmt*>(node);
             return gen_node(es->node);
@@ -111,6 +218,7 @@ llvm::Value* Codegen::gen_node(Node* node) {
     }
 }
 
+// Direct type conversion
 llvm::Type* Codegen::llvm_type(const Type& t) {
     switch (t.tkind) {
         case TypeKind::INT8: return llvm::Type::getInt8Ty(*context);
@@ -125,110 +233,135 @@ llvm::Type* Codegen::llvm_type(const Type& t) {
         case TypeKind::FLO64: return llvm::Type::getDoubleTy(*context);
         case TypeKind::BOOL: return llvm::Type::getInt1Ty(*context);
         case TypeKind::CHAR: return llvm::Type::getInt32Ty(*context);
-        case TypeKind::UNIT: return llvm::Type::getVoidTy(*context);
+        case TypeKind::UNIT:
+        case TypeKind::UNIT_: 
+        return llvm::Type::getVoidTy(*context);
         case TypeKind::STRUCT: {
             auto it = struct_type_map.find(t.struct_name);
             if (it != struct_type_map.end()) return it->second;
 
             return llvm::StructType::create(*context, std::string(t.struct_name));
         }
+        case TypeKind::REF:
+        case TypeKind::MUTREF:
         case TypeKind::STRING:
         case TypeKind::STRING_VIEW:
         case TypeKind::BUF_STRING:
+            // Stub: i8*
             return llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
         default:
             return llvm::Type::getInt64Ty(*context); // fallback
     }
 }
 
+// ----------------------------------------------------
+
+// A L L F U N C T I O N S
+
+// ----------------------------------------------------
+
+// already halfway complete in generate
 llvm::Value* Codegen::gen_function(FunctionDecl* node) {
-    // Parameters
-    std::vector<llvm::Type*> param_types;
-    for (Node* s: node->params) {
-        auto* param = static_cast<Param*>(s);
-        Type t = tchecker->query_type(param->type_ann? param->type_ann : node);
-        param_types.push_back(llvm_type(t));
-    }
+    llvm::Function* fn = fn_map[node->name.get_value()];
+    if (!fn || !node->body) return fn; // forward declaration or haven't yet been registered
 
-    // Return type
-    Type ret_type = tchecker->query_type(node->ret_type? node->ret_type : node);
-    llvm::Type* ret_llvm = llvm_type(ret_type);
-
-    // Creating the function
-    auto* fn_type = llvm::FunctionType::get(ret_llvm, param_types, false);
-    // Linkage determines how symbols are visible to the linker and how they are merged during the linking process
-    auto* fn = llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, std::string(node->name.get_value()), *_module);
-
-    fn_map[node->name.get_value()] = fn;
-
-    // Entry basic block
     auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
     builder->SetInsertPoint(entry);
 
-    // Allocate each param, store it, register in var_map
+    // Isolate function scope?
+    auto outer = save_scope();
+    var_map.clear();
+
     auto arg_it = fn->arg_begin();
     for (Node* p : node->params) {
         auto* param = static_cast<Param*>(p);
-        llvm::Value* alloca = builder->CreateAlloca(arg_it->getType(), nullptr, std::string(param->name.get_value()));
-        builder->CreateStore(&*arg_it, alloca);
-        var_map[param->name.get_value()] = alloca;
+        llvm::AllocaInst* slot = builder->CreateAlloca(arg_it->getType(), nullptr, std::string(param->name.get_value()));
+        builder->CreateStore(&*arg_it, slot);
+        var_map[param->name.get_value()] = slot;
         ++arg_it;
     }
 
-    // Generate body
-    if (node->body) gen_node(node->body);
+    gen_node(node->body);
 
-    // Add implicit void return if needed
-    if (ret_llvm->isVoidTy() && !builder->GetInsertBlock()->getTerminator())
-        builder->CreateRetVoid();
+    llvm::BasicBlock* last = builder->GetInsertBlock();
+    if (last && !last->getTerminator()) {
+        llvm::Type* ret = fn->getReturnType();
+        if (ret->isVoidTy())
+            builder->CreateRetVoid();
+        else
+            builder->CreateRet(llvm::UndefValue::get(ret));
+    }
 
+    restore_scope(std::move(outer));
     return fn;
 }
 
+// iterate statements, return last value
 llvm::Value* Codegen::gen_block(BlockExpr* node) {
+    auto saved = save_scope();
     llvm::Value* return_last = nullptr;
     for (Node* o : node->opt) {
         return_last = gen_node(o);
     }
+    restore_scope(std::move(saved));
     return return_last;
 }
 
+// 
 llvm::Value* Codegen::gen_let(LetDecl* node) {
     Type t = tchecker->query_type(node);
     llvm::Type* tllvm = llvm_type(t);
     auto* pat = static_cast<Pattern*>(node->pattern);
-    llvm::Value* alloca = builder->CreateAlloca(tllvm, nullptr, pat->name.get_value());
+
+    llvm::AllocaInst* alloca = builder->CreateAlloca(tllvm, nullptr, std::string(pat->name.get_value()));
     var_map[pat->name.get_value()] = alloca;
 
-    llvm::Value* sllvm = gen_node(node->init);
-    if (!sllvm) {
-        builder->CreateStore(sllvm, alloca);
+    if (node->init) {
+        llvm::Value* sllvm = gen_node(node->init);
+
+        if (sllvm) {
+            builder->CreateStore(sllvm, alloca);
+        }
     }
-    return sllvm;
+    
+    return alloca;
 }
 
 llvm::Value* Codegen::gen_return(ReturnStmt* node) {
-    llvm::Value* value = gen_node(node->value);
-    if (node->has_value) {
-        builder->CreateRet(value);
-    } else {
+    if (!node->has_value) {
         builder->CreateRetVoid();
-    }
+        return nullptr;
+    } 
+
+    // CreateRet/CreateRetVoid both terminate the current BasicBlock.
+    llvm::Value* value = gen_node(node->value);
+    if (value)
+        builder->CreateRet(value);
+    else
+        builder->CreateRetVoid();
 
     return value;
 }
 
 llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
+    Type ttype = tchecker->query_type(node->left);
+
+    // needs completion
+    if (node->op.type == TokenType::AND_AND || node->op.type == TokenType::OR_OR) {
+        llvm::Value* vleft = gen_node(node->left);
+        llvm::Value* vright = gen_node(node->right);
+        if (!vleft || !vright) return nullptr;
+        return node->op.type == TokenType::AND_AND ? builder->CreateAnd(vleft, vright, "and") : builder->CreateOr(vleft, vright, "or");
+    }
+    
     llvm::Value* vleft = gen_node(node->left);
     llvm::Value* vright = gen_node(node->right);
+    if (!vleft || !vright) return nullptr;
 
-
-    Type ttype = tchecker->query_type(node->left);
-    llvm::Type* tllvm = llvm_type(ttype);
 
     switch (node->op.type) {
-        // Arithmetic
 
+        // Arithmetic
         case TokenType::PLUS: {
             if (is_float(ttype.tkind)) {
                 return builder->CreateFAdd(vleft, vright);
@@ -237,6 +370,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateAdd(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::MINUS: {
             if (is_float(ttype.tkind)) {
@@ -246,6 +380,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateSub(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::STAR: {
             if (is_float(ttype.tkind)) {
@@ -255,6 +390,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateMul(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::SLASH: {
             if (is_float(ttype.tkind)) {
@@ -264,6 +400,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateUDiv(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::PERCENT: {
             if (is_signed_int(ttype.tkind)) {
@@ -271,6 +408,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateURem(vleft, vright);
             }
+            return nullptr;
         }
 
         // Comparison
@@ -278,20 +416,20 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
         case TokenType::EQUAL_EQUAL: {
             if (is_float(ttype.tkind)) {
                 return builder->CreateFCmpOEQ(vleft, vright);
-            } else if (is_signed_int(ttype.tkind)) {
-                return builder->CreateICmpEQ(vleft, vright);
-            } else if (is_unsigned_int(ttype.tkind)) {
+            } else if (is_integer(ttype.tkind)) {
                 return builder->CreateICmpEQ(vleft, vright);
             }
+            return nullptr;
         }
-        case TokenType::BANG_EQUAL: {
+        case TokenType::BANG_EQUAL: 
+        case TokenType::NOT_EQUAL:
+        {
             if (is_float(ttype.tkind)) {
                 return builder->CreateFCmpONE(vleft, vright);
-            } else if (is_signed_int(ttype.tkind)) {
-                return builder->CreateICmpNE(vleft, vright);
-            } else if (is_unsigned_int(ttype.tkind)) {
+            } else if (is_integer(ttype.tkind)) {
                 return builder->CreateICmpNE(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::LESS: {
             if (is_float(ttype.tkind)) {
@@ -301,6 +439,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateICmpULT(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::LESS_EQUAL: {
             if (is_float(ttype.tkind)) {
@@ -310,6 +449,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateICmpULE(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::GREATER: {
             if (is_float(ttype.tkind)) {
@@ -319,6 +459,7 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateICmpUGT(vleft, vright);
             }
+            return nullptr;
         }
         case TokenType::GREATER_EQUAL: {
             if (is_float(ttype.tkind)) {
@@ -328,39 +469,41 @@ llvm::Value* Codegen::gen_binary(BinaryExpr* node) {
             } else if (is_unsigned_int(ttype.tkind)) {
                 return builder->CreateICmpUGE(vleft, vright);
             }
+            return nullptr;
         }
         // stub
-
+        default: return nullptr;
     }
 
 
 }
 
 llvm::Value* Codegen::gen_literal(Literal* node) {
+
     switch (node->literal) {
+
         case LiteralType::IntLiteral: {
-            int value = std::stoi(std::string(node->token.get_value()));
+            int value = std::stoll(std::string(node->token.get_value()));
             Type ttype = tchecker->query_type(node);
             llvm::Type* tllvm = llvm_type(ttype);
             return llvm::ConstantInt::get(tllvm, value, true);
         }
         case LiteralType::FloatLiteral: {
-            float value = std::stof(std::string(node->token.get_value()));
+            float value = std::stod(std::string(node->token.get_value()));
             Type ttype = tchecker->query_type(node);
             llvm::Type* tllvm = llvm_type(ttype);
             return llvm::ConstantFP::get(tllvm, value);
         }
         case LiteralType::BoolLiteral: {
-            Type ttype = tchecker->query_type(node);
-            llvm::Type* tllvm = llvm_type(ttype);
-            if (std::string(node->token.get_value()) == "true") {
-                return llvm::ConstantInt::get(tllvm, 1);
+            if (node->token.get_value() == "true") {
+                return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1);
             } else if (std::string(node->token.get_value()) == "false") {
-                return llvm::ConstantInt::get(tllvm, 0);
+                return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0);
             }
         }
         case LiteralType::UnitLiteral:
             return nullptr;
+        // needs completion
         case LiteralType::CharLiteral: {
             char c = node->token.get_value()[0];
             int value = int(c);
@@ -370,122 +513,233 @@ llvm::Value* Codegen::gen_literal(Literal* node) {
         }
         case LiteralType::StringLiteral: {
             // Stub
-            return builder->CreateGlobalStringPtr(node->token.get_value());
+            std::string raw = std::string(node->token.get_value());
+            if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"')
+                raw = raw.substr(1, raw.size() - 2);
+            return builder->CreateGlobalStringPtr(raw, "str");
         }
-
     }
+    return nullptr;
 }
 
 llvm::Value* Codegen::gen_identifier(Identifier* node) {
-    Type ttype = tchecker->query_type(node);
-    llvm::Type* tllvm = llvm_type(ttype);
-    auto* alloca = var_map[node->token.get_value()];
-    return builder->CreateLoad(tllvm, alloca);
+    auto it = var_map.find(node->token.get_value());
+    if (it == var_map.end()) return nullptr;
+    auto* slot = static_cast<llvm::AllocaInst*>(it->second);
+    // getAllocatedType(): method on AllocaInst* that returns the type of what is stored at the allocation. Used as the first argument to CreateLoad.
+    return builder->CreateLoad(slot->getAllocatedType(), slot, std::string(node->token.get_value()));
 }
 
 llvm::Value* Codegen::gen_call(CallExpr* node) {
-    auto* tmp = static_cast<Identifier*>(node->callee);
-    llvm::Function* fn = fn_map[tmp->token.get_value()];
+    auto* id = static_cast<Identifier*>(node->callee);
+    auto it = fn_map.find(id->token.get_value());
+    if (it == fn_map.end()) return nullptr;
+    llvm::Function* fn = it->second;
+    
     std::vector<llvm::Value*> args;
+    args.reserve(node->args.size());
     for (Node* a : node->args) {
-        args.push_back(gen_node(a));
+        llvm::Value* v = gen_node(a);
+        if (v) args.push_back(v);
     }
-    return builder->CreateCall(fn, args, "calltmp");
+
+    if (!fn->getReturnType()->isVoidTy())
+        return builder->CreateCall(fn, args, "calltmp");
+    else 
+        return builder->CreateCall(fn, args);
 
 }
 
+// gen condition -> term block -> set then -> ?create branch -> set else -> gen else -> ?create branch -> set merge
 llvm::Value* Codegen::gen_if(IfStmt* node) {
+    llvm::Value* vcond = gen_node(node->node);
+    if (!vcond) return nullptr;
+
     llvm::Function* current_fn = builder->GetInsertBlock()->getParent();
     auto* then_block = llvm::BasicBlock::Create(*context, "name", current_fn);
     auto* else_block = llvm::BasicBlock::Create(*context, "name", current_fn);
     auto* merge_block = llvm::BasicBlock::Create(*context, "name", current_fn);
 
-    llvm::Value* vcond = gen_node(node->node);
     builder->CreateCondBr(vcond, then_block, else_block); // Conditional branch to a block, terminates current block
-    builder->SetInsertPoint(then_block);
 
-    llvm::Value* vblock = gen_node(node->block);
+    // Then branch
+    builder->SetInsertPoint(then_block);
+    gen_node(node->block);
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(merge_block); // Unconditional branch to a block, terminates current block
-        builder->SetInsertPoint(else_block);
     }
 
-    llvm::Value* vother = nullptr;
-    if (node->other) {
-        vother = gen_node(node->other);
-    }
-    if (!builder->GetInsertBlock()->getTerminator()) {
+    // Else branch
+    builder->SetInsertPoint(else_block);
+    if (node->other)
+        gen_node(node->other);
+    if (!builder->GetInsertBlock()->getTerminator())
         builder->CreateBr(merge_block);
-        builder->SetInsertPoint(merge_block);
-    }
-    
-    return vother;
-}  
+
+    builder->SetInsertPoint(merge_block);
+
+    return nullptr;
+}
 
 llvm::Value* Codegen::gen_while(WhileStmt* node) {
     llvm::Function* current_fn = builder->GetInsertBlock()->getParent();
-    auto* cond_block = llvm::BasicBlock::Create(*context, "name", current_fn);
-    auto* body_block = llvm::BasicBlock::Create(*context, "name", current_fn);
-    auto* exit_block = llvm::BasicBlock::Create(*context, "name", current_fn);
+    auto* cond_block = llvm::BasicBlock::Create(*context, "while.cond", current_fn);
+    auto* body_block = llvm::BasicBlock::Create(*context, "while.body", current_fn);
+    auto* exit_block = llvm::BasicBlock::Create(*context, "while.exit", current_fn);
+
+    llvm::BasicBlock* outer_exit = loop_exit_bb;
+    llvm::BasicBlock* outer_continue = loop_continue_bb;
+    loop_exit_bb = exit_block;
+    loop_continue_bb = cond_block;
 
     builder->CreateBr(cond_block);
+    builder->SetInsertPoint(cond_block);
     llvm::Value* vcond = gen_node(node->condition);
     builder->CreateCondBr(vcond, body_block, exit_block);
 
-    llvm::Value* vblock = gen_node(node->block);
-    builder->CreateBr(cond_block);
-    builder->SetInsertPoint(exit_block);
+    builder->SetInsertPoint(body_block);
+    gen_node(node->block);
+    
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(cond_block);
+    }
+    loop_exit_bb = outer_exit;
+    loop_continue_bb = outer_continue;
 
+    builder->SetInsertPoint(exit_block);
+    return nullptr;
+}
+
+llvm::Value* Codegen::gen_loop(LoopStmt* node) {
+    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+    auto* body_block = llvm::BasicBlock::Create(*context, "loop.body", fn);
+    auto* exit_block = llvm::BasicBlock::Create(*context, "loop.body", fn);
+
+    llvm::BasicBlock* outer_exit     = loop_exit_bb;
+    llvm::BasicBlock* outer_continue = loop_continue_bb;
+    loop_exit_bb     = exit_block;
+    loop_continue_bb = body_block; 
+
+    builder->CreateBr(body_block);
+    builder->SetInsertPoint(body_block);
+    gen_node(node->block);
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(body_block);
+
+    loop_exit_bb     = outer_exit;
+    loop_continue_bb = outer_continue;
+
+    builder->SetInsertPoint(exit_block);
+    return nullptr;
 }
 
 llvm::Value* Codegen::gen_assign(AssignExpr* node) {
-    llvm::Value* vtarget = nullptr;
-    if (node->target->type == NodeType::Identifier) {
-        Identifier* tmp = static_cast<Identifier*>(node->target);
-        vtarget = var_map[tmp->token.get_value()];
-    } else {
-        // needs completing
-    }
+    llvm::Value* target_ptr = gen_lvalue(node->target);
+    llvm::Value* rhs = gen_node(node->value);
 
-    llvm::Value* rhvalue = gen_node(node->value);
-    builder->CreateStore(rhvalue, vtarget);
-    return nullptr; // needs fixing
+    if (target_ptr && rhs)
+        builder->CreateStore(rhs, target_ptr);
+    return nullptr;
 }
 
-llvm::Value* Codegen::gen_struct_decl(StructDecl* node) {
-    
-    llvm::StructType* sttllvm = llvm::StructType::create(*context, node->tag.get_value());
-    std::vector<llvm::Type*> stfields;
-    for (Node* f : node->opt) {
-        auto* fi = static_cast<FieldDecl*>(f);
-        Type ttype = tchecker->query_type(fi->type_ann);
-        stfields.push_back(llvm_type(ttype));
+llvm::Value* Codegen::gen_lvalue(Node* node) {
+    if (node->type == NodeType::Identifier) {
+        auto* id = static_cast<Identifier*>(node);
+        auto it = var_map.find(id->token.get_value());
+        return it != var_map.end() ? it->second : nullptr;
     }
-    sttllvm->setBody(stfields);
-    struct_type_map[node->tag.get_value()] = sttllvm;
+    if (node->type == NodeType::FieldExpr) {
+        auto* fe = static_cast<FieldExpr*>(node);
+        llvm::Value* obj_ptr = gen_lvalue(fe->object);
+        if (!obj_ptr) return nullptr;
 
-    for (Node* f : node->opt) {
-        auto* fi = static_cast<FieldDecl*>(f);
-        field_map[fi->name.get_value()][fi->name.get_value()];
+        Type obj_type = tchecker->query_type(fe->object);
+        if (obj_type.tkind != TypeKind::STRUCT) return nullptr;
+
+        auto sit = struct_type_map.find(obj_type.struct_name);
+        if (sit == struct_type_map.end()) return nullptr;
+
+        auto& fields = field_map[obj_type.struct_name];
+        auto fit = fields.find(fe->field.get_value());
+        if (fit == fields.end()) return nullptr;
+
+        return builder->CreateStructGEP(sit->second, obj_ptr, fit->second, std::string(fe->field.get_value()));
     }
+    return nullptr;
+}
+
+// Returns pointer to storage of assignable node
+llvm::Value* Codegen::gen_struct_decl(StructDecl* node) {
+    std::string_view name = node->tag.get_value();
+    auto* stype = llvm::StructType::create(*context, std::string(name));
+    struct_type_map[name] = stype;
+
+    std::vector<llvm::Type*> field_types;
+    unsigned idx = 0;
+    for (Node* f : node->opt) {
+        auto* fd = static_cast<FieldDecl*>(f);
+        Type ft = tchecker->query_type(fd->type_ann ? fd->type_ann : fd);
+
+        field_types.push_back(llvm_type(ft));
+        field_map[name][fd->name.get_value()] = idx++;
+    }
+
+    stype->setBody(field_types);
+    return nullptr;
 }
 
 llvm::Value* Codegen::gen_struct_init(StructInit* node) {
-    llvm::StructType* sttype = struct_type_map[node->name.get_value()];
-    llvm::Value* strf = builder->CreateAlloca(sttype);
+    std::string_view sname = node->name.get_value();
+    auto sit = struct_type_map.find(sname);
+    if (sit == struct_type_map.end()) return nullptr;
+    llvm::StructType* stype = sit->second;
+
+    // CreateAlloca(StructType*): allocates sizeof(struct) bytes on the stack
+    llvm::AllocaInst* alloc = builder->CreateAlloca(stype, nullptr, std::string(sname));
+
     for (Node* f : node->opt) {
         auto* fi = static_cast<FieldInit*>(f);
-        unsigned index = field_map[fi->name.get_value()][fi->name.get_value()];
-        llvm::Value* point = builder->CreateStructGEP(sttype, strf, index);
-        llvm::Value* val = gen_node(fi->value);
-        builder->CreateStore(val, point);
+
+        auto& fields = field_map[sname];
+        auto fit = fields.find(fi->name.get_value());
+        if (fit == fields.end()) continue;
+        
+        // CreateStructGEP(Type, Ptr, Index): pointer to a specific field
+        llvm::Value* field_ptr = builder->CreateStructGEP(
+            stype, alloc, fit->second, std::string(fi->name.get_value()));
+        
+        llvm::Value* val = nullptr;
+        if (fi->shorthand) {
+            auto vit = var_map.find(fi->name.get_value());
+            if (vit != var_map.end()) {
+                auto* vslot = static_cast<llvm::AllocaInst*>(vit->second);
+                val = builder->CreateLoad(vslot->getAllocatedType(), vit->second);
+            }
+        } else {
+            val = gen_node(fi->value);
+        }
+        // CreateStore: writes the field value into the field slot
+        if (val) builder->CreateStore(val, field_ptr);
     }
 
-    return strf;
+    return alloc;
 }
 
 llvm::Value* Codegen::gen_field(FieldExpr* node) {
-    llvm::Value* object = gen_node(node->object);
-    Type ttype = tchecker->query_type(node->object);
-    
+    llvm::Value* field_ptr = gen_lvalue(node);
+    if (!field_ptr) return nullptr;
+    Type ftype = tchecker->query_type(node);
+    return builder->CreateLoad(llvm_type(ftype), field_ptr, std::string(node->field.get_value()));
+}
+
+llvm::Value* Codegen::gen_break(BreakStmt* node) {
+    if (loop_exit_bb)
+        builder->CreateBr(loop_exit_bb);
+    return nullptr;
+}
+
+llvm::Value* Codegen::gen_continue(ContinueStmt* node) {
+    if (loop_continue_bb)
+        builder->CreateBr(loop_continue_bb);
+    return nullptr;
 }
