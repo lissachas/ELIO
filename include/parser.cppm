@@ -119,6 +119,7 @@ export class Parser {
     Node* parse_continue_stmt();
     Node* parse_expr_stmt();
 
+    Node* parse_type_alias();
     Node* parse_function_decl();
     Node* parse_struct_decl();
     Node* parse_global_decl();
@@ -153,6 +154,7 @@ Node* Parser::parse() {
 Node* Parser::parse_item() {
     if (match(FN)) return parse_function_decl();
     if (match(STRUCT)) return parse_struct_decl();
+    if (match(TYPE))   return parse_type_alias();
     if (check(LET) || check(CONST)) return parse_global_decl();
 
     throw std::runtime_error("Expected function, struct, or global declaration");
@@ -229,6 +231,17 @@ Node* Parser::parse_const_decl() {
     expect(EQUAL, "Expected '='");
     node->init = parse_expr();
     expect(SEMI, "Expected ';'");
+    return node;
+}
+
+Node* Parser::parse_type_alias() {
+    auto* node = arena.alloc<TypeAliasDecl>();
+    node->type = NodeType::TypeAliasDecl;
+    expect(IDENT, "Expected name after 'type'");
+    node->name = previous();
+    expect(EQUAL, "Expected '=' in type alias");
+    node->target = parse_type();
+    expect(SEMI, "Expected ';' after type alias");
     return node;
 }
 
@@ -364,6 +377,10 @@ Node* Parser::parse_break_stmt() {
     node->type      = NodeType::BreakStmt;
     node->has_value = false;
     node->value     = nullptr;
+    if (check(IDENT)) {
+        node->has_tag = true;
+        node->tag = advance();
+    }
     if (!match(SEMI)) {
         node->has_value = true;
         node->value = parse_expr();

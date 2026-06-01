@@ -1,6 +1,7 @@
 module;
 
 #include <vector>
+#include <cassert>
 
 export module expr;
 
@@ -14,10 +15,15 @@ struct Arena {
     std::vector<std::byte> buf;
     size_t offset = 0;
 
+    Arena() {
+        buf.resize(4 * 1024 * 1024); // 4 MB
+    }
+
     template<typename T, typename... Args>
     T* alloc(Args&&... args) {
         void* pointer = buf.data() + offset;
         offset += sizeof(T);
+        assert(offset + sizeof(T) <= buf.size() && "Arena exhausted");
         return new(pointer) T(std::forward<Args>(args)...);
     }
 };
@@ -29,7 +35,7 @@ enum class NodeType {
     // Statements
     ExprStmt, IfStmt, WhileStmt, ForStmt, LoopStmt, MatchStmt, ReturnStmt, BreakStmt, ContinueStmt,
     // Declarations
-    LetDecl, ConstDecl, FunctionDecl, StructDecl,
+    LetDecl, ConstDecl, FunctionDecl, StructDecl, TypeAliasDecl,
     // Other
     TypeNode, Pattern, MatchArm, Param, FieldDecl, FieldInit
 
@@ -232,6 +238,11 @@ struct FunctionDecl : Node {
 struct StructDecl : Node {
     Token tag;
     std::vector<Node*> opt;
+};
+
+struct TypeAliasDecl : Node {
+    Token  name;       // the alias name
+    Node*  target;     // TypeNode* of the aliased type
 };
 
 

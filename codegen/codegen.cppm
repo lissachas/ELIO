@@ -10,6 +10,7 @@ module;
 #include <llvm/IR/Verifier.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/FileSystem.h>
 #include <vector>
 #include <memory>
 #include <unordered_map>
@@ -24,6 +25,7 @@ module;
 #include <system_error>
 #include <llvm-19/llvm/IR/Constants.h>
 #include <llvm-19/llvm/IR/Instructions.h>
+
 
 export module codegen;
 
@@ -178,12 +180,12 @@ void Codegen::emit_ir(const std::string& path) {
     mpm.run(*_module, mam);
 
     std::error_code ec;
-    //llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OpenFlags);
+    llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
     if (ec) {
         llvm::errs() << "Cannot open output: " << ec.message() << "\n";
         return;
     }
-   // _module->print(out, nullptr);
+   _module->print(out, nullptr);
 }
 
 
@@ -613,7 +615,7 @@ llvm::Value* Codegen::gen_while(WhileStmt* node) {
 llvm::Value* Codegen::gen_loop(LoopStmt* node) {
     llvm::Function* fn = builder->GetInsertBlock()->getParent();
     auto* body_block = llvm::BasicBlock::Create(*context, "loop.body", fn);
-    auto* exit_block = llvm::BasicBlock::Create(*context, "loop.body", fn);
+    auto* exit_block = llvm::BasicBlock::Create(*context, "loop.exit", fn);
 
     llvm::BasicBlock* outer_exit     = loop_exit_bb;
     llvm::BasicBlock* outer_continue = loop_continue_bb;

@@ -125,6 +125,7 @@ export class TypeChecker {
     FunctionDecl* current_fn = nullptr;
     std::unordered_map<std::string_view, Type> var_types;
     std::vector<Type> current_loop_break_types;
+    std::unordered_map<std::string_view, Type> alias_map;
 
     void set_type(Node* n, Type t) {
         type_cache[n] = t;
@@ -307,8 +308,15 @@ Type TypeChecker::resolve_type_node(TypeNode* tn) {
             return Type::make_mut_ref(inner);
         }
         case TypeType::Named: {
-            
-            
+            auto it = alias_map.find(tn->name.get_value());
+            if (it != alias_map.end()) {
+                return it->second; // return the resolved aliased type
+            }
+            // Otherwise it's a struct
+            Type t;
+            t.tkind = TypeKind::STRUCT;
+            t.struct_name = tn->name.get_value();
+            return t;
         }
 
         case TypeType::Array: {
@@ -316,6 +324,8 @@ Type TypeChecker::resolve_type_node(TypeNode* tn) {
             size_t n = tn->array_size;
             return Type::make_array(inner, n);
         }
+
+        default: return Type::make(TypeKind::UNKNOWN);
     }
 }
 
@@ -343,6 +353,14 @@ void TypeChecker::check(Node* program) {
         }
     }
 
+    // pre-pass 3
+    for (Node* item : root->opt) {
+    if (item->type == NodeType::TypeAliasDecl) {
+        auto* ta = static_cast<TypeAliasDecl*>(item);
+        alias_map[ta->name.get_value()] = resolve_type_node(static_cast<TypeNode*>(ta->target));
+    }
+}
+
     // main pass
     for (Node* item : root->opt)
         check_node(item);
@@ -351,12 +369,46 @@ void TypeChecker::check(Node* program) {
 Type TypeChecker::check_node(Node* node) {
     if (!node) return Type::make(TypeKind::UNIT_);
     switch (node->type) {
-        case NodeType::Literal:    return check_literal(static_cast<Literal*>(node));
-        case NodeType::BinaryExpr: return check_binary(static_cast<BinaryExpr*>(node));
+        case NodeType::Literal: return check_literal(static_cast<Literal*>(node));
         case NodeType::Identifier: return check_identifier(static_cast<Identifier*>(node));
-        case NodeType::BlockExpr:  return check_block(static_cast<BlockExpr*>(node));
-        case NodeType::LetDecl:    check_let(static_cast<LetDecl*>(node));
-                                return Type::make(TypeKind::UNIT_);
+        case NodeType::BinaryExpr: return check_binary(static_cast<BinaryExpr*>(node));
+        case NodeType::UnaryExpr: return check_unary(static_cast<UnaryExpr*>(node));
+        case NodeType::BlockExpr: return check_block(static_cast<BlockExpr*>(node));
+        case NodeType::LetDecl: check_let(static_cast<LetDecl*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::ConstDecl: check_const(static_cast<ConstDecl*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::FunctionDecl: check_function(static_cast<FunctionDecl*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::StructDecl: check_struct(static_cast<StructDecl*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::ExprStmt: check_expr_stmt(static_cast<ExprStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::IfStmt: check_if_stmt(static_cast<IfStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::WhileStmt: check_while(static_cast<WhileStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::ForStmt: check_for(static_cast<ForStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::LoopStmt: return check_loop(static_cast<LoopStmt*>(node));
+        case NodeType::ReturnStmt: check_return(static_cast<ReturnStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::BreakStmt: check_break(static_cast<BreakStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::ContinueStmt: check_continue(static_cast<ContinueStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::MatchStmt: check_match_stmt(static_cast<MatchStmt*>(node));
+            return Type::make(TypeKind::UNIT_);
+        case NodeType::CallExpr: return check_call(static_cast<CallExpr*>(node));
+        case NodeType::IndexExpr: return check_index(static_cast<IndexExpr*>(node));
+        case NodeType::FieldExpr: return check_field(static_cast<FieldExpr*>(node));
+        case NodeType::AssignExpr: return check_assign(static_cast<AssignExpr*>(node));
+        case NodeType::IfExpr: return check_if_expr(static_cast<IfExpr*>(node));
+        case NodeType::MatchExpr: return check_match_expr(static_cast<MatchExpr*>(node));
+        case NodeType::LambdaExpr: return check_lambda(static_cast<LambdaExpr*>(node));
+        case NodeType::StructInit: return check_struct_init(static_cast<StructInit*>(node));
+        case NodeType::BuiltInCast: return check_builtin(static_cast<BuiltinCast*>(node));
+        default: return Type::make(TypeKind::UNIT_);
     }
 }
 

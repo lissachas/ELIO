@@ -50,30 +50,32 @@ export class Resolver {
             current = current->parent;
             delete old;
         }
-        void define(Token name, Symbol sym) {
-            if (!current->define(name.get_value(), sym)) {
-                err.error(name.get_line(),
-                          std::string(name.get_value()),
-                          "Name already defined in this scope");
-            }
+        Node* lookup_any(Token name) {
+            std::string_view n = name.get_value();
+            if (auto* v = current->lookup_var(n))   return v->decl;
+            if (auto* f = current->lookup_fn(n))    return f->decl;
+            if (auto* t = current->lookup_type(n))  return t->decl;
+            err.error(name.get_line(), std::string(n), "Undefined identifier");
+            return nullptr;
         }
-        Symbol* lookup(Token name) {
-            Symbol* sym = current->lookup(name.get_value());
-            if (!sym) 
-                err.error(name.get_line(),
-                          std::string(name.get_value()),
-                          "Undefined identifier");
-            return sym;
+        bool lookup_type_exists(Token name) {
+            if (current->lookup_type(name.get_value())) return true;
+            err.error(name.get_line(), std::string(name.get_value()), "Unknown type");
+            return false;
+        }
+        bool lookup_var_is_mutable(Token name) {
+            auto* v = current->lookup_var(name.get_value());
+            return v && v->is_mutable;
         }
         bool check_tag(std::string_view tag) {
             for (auto& t: active_tags) 
                 if (t == tag) return true;
             return false;
         }
-        bool push_tag(std::string_view tag) {
+        void push_tag(std::string_view tag) {
             active_tags.push_back(tag);
         }
-        bool pop_tag() {
+        void pop_tag() {
             active_tags.pop_back();
         }
     
@@ -115,21 +117,9 @@ export class Resolver {
         void resolve_struct_init(StructInit*);
         void resolve_builtin(BuiltinCast*);
 
-        void resolve_pattern(Pattern*);
+        void resolve_pattern(Pattern* pat, Node* decl, bool is_mutable);
         void resolve_match_arm(MatchArm*);
-
-        void visit_block(BlockExpr* block);
-        void visit_let_decl(LetDecl* decl);
-        void visit_identifier(Identifier* id);
 };
-
-
-
-void Resolver::visit_block(BlockExpr* block) {
-    push_scope();
-    resolve(block);
-    pop_scope();
-}
 
 void Resolver::resolve(Node* program) {
         // Start new global scope
@@ -140,29 +130,21 @@ void Resolver::resolve(Node* program) {
         auto* root = static_cast<BlockExpr*>(program);
 
 
-        for (Node* node: root->opt) {
+        for (Node* node : root->opt) {
             if (node->type == NodeType::FunctionDecl) {
                 auto* fn = static_cast<FunctionDecl*>(node);
-                Symbol s {
-                    SymbolType::Function,
-                    fn->name,
-                    fn,
-                    fn->ret_type,
-                    false
-                };
-                define(fn->name, s);
+                FnSymbol s { fn->name, fn, fn->ret_type };
+                current->define_fn(fn->name.get_value(), s);
             }
-
             if (node->type == NodeType::StructDecl) {
                 auto* st = static_cast<StructDecl*>(node);
-                Symbol s {
-                    SymbolType::Struct,
-                    st->tag,
-                    st,
-                    nullptr,
-                    false
-                };
-                define(st->tag, s);
+                StructSymbol s { st->tag, st };
+                current->define_type(st->tag.get_value(), s);
+            }
+            if (node->type == NodeType::TypeAliasDecl) {
+                auto* ta = static_cast<TypeAliasDecl*>(node);
+                TypeAliasSymbol s { ta->name, ta->target };
+                current->define_alias(ta->name.get_value(), s);
             }
         }
 
@@ -198,6 +180,15 @@ void Resolver::resolve_node(Node* node) {
         case NodeType::StructDecl: 
             resolve_struct(static_cast<StructDecl*>(node));
             break;
+        case NodeType::TypeAliasDecl: {
+            auto* ta = static_cast<TypeAliasDecl*>(node);
+            TypeAliasSymbol sym { ta->name, ta->target };
+            if (!current->define_alias(ta->name.get_value(), sym))
+                err.error(ta->name.get_line(),
+                        std::string(ta->name.get_value()),
+                        "Type alias already defined");
+            break;
+        }
         
         // statements
         case NodeType::BlockExpr:
@@ -273,27 +264,22 @@ void Resolver::resolve_let(LetDecl* node) {
 
     // Extract name from pattern (SIMPLIFIED)
     auto* pat = static_cast<Pattern*>(node->pattern);
-    Symbol sym {
-        SymbolType::Let,
-        pat->name,
-        node,
-        node->type_ann,
-        true
-    };
-    resolve_pattern(pat); 
+    resolve_pattern(pat, node, true); 
 }
 
 void Resolver::resolve_const(ConstDecl* node) {
     resolve_node(node->init);
 
-    Symbol sym {
-        SymbolType::Const,
+    VarSymbol sym {
         node->ident,
         node,
         node->type_ann,
         false
     };
-    define(node->ident, sym);
+    if (!current->define_var(node->ident.get_value(), sym))
+        err.error(node->ident.get_line(),
+                  std::string(node->ident.get_value()),
+                  "Name already defined in this scope");
 }
 
 void Resolver::resolve_function(FunctionDecl* node) {
@@ -305,14 +291,17 @@ void Resolver::resolve_function(FunctionDecl* node) {
     push_scope();
     for (Node* p: node->params) {
         auto* param = static_cast<Param*>(p);
-        Symbol sym {
-            SymbolType::Param,
+        VarSymbol sym {
             param->name,
             param,
             param->type_ann,
             false  
         };
-        define(param->name, sym);
+        if (!current->define_var(param->name.get_value(), sym))
+            err.error(param->name.get_line(),
+                      std::string(param->name.get_value()),
+                      "Duplicate parameter name");
+    
     }
 
     if (node->body) {
@@ -375,7 +364,7 @@ void Resolver::resolve_break(BreakStmt* node) {
     if (node->has_value) resolve_node(node->value);
     if (node->has_tag) {
         if(!check_tag(node->tag.get_value()))
-            err.error(0, "break_tag", "Break inside untagged loop");
+            err.error(0, "break_tag", "Break targets unknown tag");
     }
     
 }
@@ -426,7 +415,7 @@ void Resolver::resolve_for(ForStmt* node) {
     // Pattern to loop body
     push_scope();
     auto* pat = static_cast<Pattern*>(node->pattern);
-    resolve_pattern(pat);
+    resolve_pattern(pat, node, true);
     resolve_node(node->block);
     pop_scope();
 
@@ -450,8 +439,16 @@ void Resolver::resolve_match_stmt(MatchStmt* node) {
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>..
 
 void Resolver::resolve_identifier(Identifier* node) {
-    Symbol* sym = lookup(node->token);
-    if (sym) node->resolved = sym->decl;
+    std::string_view name = node->token.get_value();
+    if (auto* v = current->lookup_var(name)) {
+        node->resolved = v->decl;
+        return;
+    }
+    if (auto* f = current->lookup_fn(name)) {
+        node->resolved = f->decl;
+        return;
+    }
+    err.error(node->token.get_line(), std::string(name), "Undefined identifier");
 }
 
 void Resolver::resolve_literal(Literal* node) {
@@ -492,13 +489,11 @@ void Resolver::resolve_assign(AssignExpr* node) {
     // Mutability check
     if (node->target->type == NodeType::Identifier) {
         auto* id = static_cast<Identifier*>(node->target);
-        if (id->resolved) {
-            Symbol* sym = current->lookup(id->token.get_value());
-            if (sym && !sym->is_mutable)
-                err.error(id->token.get_line(),
-                          std::string(id->token.get_value()),
-                          "Cannot assign to immutable variable");
-        }
+        auto* sym = current->lookup_var(id->token.get_value());
+        if (sym && id->resolved && !sym->is_mutable)
+            err.error(id->token.get_line(),
+                      std::string(id->token.get_value()),
+                      "Cannot assign to immutable variable");
     }
 }
 
@@ -520,14 +515,16 @@ void Resolver::resolve_lambda(LambdaExpr* node) {
 
     for (Node* p: node->param) {
         auto* param = static_cast<Param*>(p);
-        Symbol sym {
-            SymbolType::Param,
+        VarSymbol sym {
             param->name,
             param,
             param->type_ann,
             false  
         };
-        define(param->name, sym);
+        if (!current->define_var(param->name.get_value(), sym))
+            err.error(param->name.get_line(),
+                      std::string(param->name.get_value()),
+                      "Duplicate parameter in lambda");
     }
     resolve_node(node->node);
 
@@ -540,7 +537,10 @@ void Resolver::resolve_block_expr(BlockExpr* node) {
 
 void Resolver::resolve_struct_init(StructInit* node) {
     // verify struct exist
-    lookup(node->name);
+    if (!current->lookup_type(node->name.get_value()))
+        err.error(node->name.get_line(),
+                  std::string(node->name.get_value()),
+                  "Unknown struct type");
 
     // resolve each field
     for (Node* s: node->opt) {
@@ -548,8 +548,7 @@ void Resolver::resolve_struct_init(StructInit* node) {
         if (!field->shorthand) {
             resolve_node(field->value);
         } else {
-            Symbol* sym = current->lookup(field->name.get_value());
-            if (!sym) 
+            if (!current->lookup_var(field->name.get_value()))
                 err.error(field->name.get_line(),
                           std::string(field->name.get_value()),
                           "Undefined variable in struct shorthand init");
@@ -573,19 +572,16 @@ void Resolver::resolve_builtin(BuiltinCast* node) {
 
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>..
 
-void Resolver::resolve_pattern(Pattern* pat) {
+void Resolver::resolve_pattern(Pattern* pat, Node* decl, bool is_mutable) {
     // Define names into current scope
     switch (pat->pat_type) {
         case PatternType::Identifier:
             if (pat->name.get_value() != "_") {
-                Symbol sym {
-                    SymbolType::Let,
-                    pat->name,
-                    nullptr,
-                    nullptr,
-                    true
-                };
-                define(pat->name, sym);
+                VarSymbol sym { pat->name, decl, nullptr, is_mutable };
+                if (!current->define_var(pat->name.get_value(), sym))
+                    err.error(pat->name.get_line(),
+                            std::string(pat->name.get_value()),
+                            "Name already defined in this scope");
             }
             break;
         case PatternType::Wildcard:
@@ -600,17 +596,17 @@ void Resolver::resolve_pattern(Pattern* pat) {
         case PatternType::Ok:
         case PatternType::Err:
             if (pat->inner)
-                resolve_pattern(static_cast<Pattern*>(pat->inner));
+                resolve_pattern(static_cast<Pattern*>(pat->inner), decl, is_mutable);
             break;
         
         case PatternType::Tuple:
             for (Node* f : pat->fields)
-                resolve_pattern(static_cast<Pattern*>(f));
+                resolve_pattern(static_cast<Pattern*>(f), decl, is_mutable);
             break;
 
         case PatternType::Struct:
             for (Node* f: pat->fields)
-                resolve_pattern(static_cast<Pattern*>(f));
+                resolve_pattern(static_cast<Pattern*>(f), decl, is_mutable);
             break;
     }
 }
@@ -619,7 +615,7 @@ void Resolver::resolve_match_arm(MatchArm* arm) {
     // each arm gets its own scope so pattern bindings don't leak
     push_scope();
     auto* pat = static_cast<Pattern*>(arm->pattern);
-    resolve_pattern(pat);
+    resolve_pattern(pat, arm, false);
     resolve_node(arm->body);
     pop_scope();
 }

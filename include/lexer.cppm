@@ -86,6 +86,7 @@ export class Lexer {
             {"optional", OPTIONAL}, {"result", RESULT}, {"shared", SHARED}, {"weak", WEAK},
             {"sign", SIGN}, {"unsign", UNSIGN}, {"trunc_cast", TRUNC_CAST}, {"check_cast", CHECK_CAST},
             {"wrap_add", WRAP_ADD}, {"wrap_sub", WRAP_SUB}, {"wrap_mul", WRAP_MUL},
+            {"type", TYPE},
 
             //TYPENAMES:
             {"bool", BOOL}, {"unit", UNIT}, 
