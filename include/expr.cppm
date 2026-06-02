@@ -207,9 +207,15 @@ struct ContinueStmt : Node {
     Token tag;
 };
 
+enum class BreakType {
+    Plain,
+    WithValue,
+    WithTag,
+    WithTagValue
+};
+
 struct BreakStmt : Node {
-    bool has_value;
-    bool has_tag;
+    BreakType break_type;
     Token tag;
     Node* value;
 };

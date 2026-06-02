@@ -453,15 +453,16 @@ void TypeChecker::check_let(LetDecl* node) {
 
 void TypeChecker::check_const(ConstDecl* node) {
     Type init_type = check_node(node->init);
+    Type final_type = init_type;
 
     if (node->type_ann) {
         Type declared = resolve_type_node(static_cast<TypeNode*>(node->type_ann));
         if (!types_equal(init_type, declared))
             err.error(0, "const", "Initializer type does not match declared type");
+        final_type = declared;
     }
 
-    Token ident = node->ident;
-    
+    var_types[node->ident.get_value()] = final_type;
 }
 
 // ======================================================
@@ -552,9 +553,17 @@ void TypeChecker::check_return(ReturnStmt* node) {
 }
 
 void TypeChecker::check_break(BreakStmt* node) {
-    if (node->has_value) {
-        Type t = check_node(node->value);
-        current_loop_break_types.push_back(t);
+    switch (node->break_type) {
+        case BreakType::Plain:
+        case BreakType::WithTag:
+            break;
+        case BreakType::WithValue:
+        case BreakType::WithTagValue:
+            if (node->value) {
+                Type t = check_node(node->value);
+                current_loop_break_types.push_back(t);
+            }
+            break;
     }
 }
 
@@ -669,13 +678,13 @@ Type TypeChecker::check_unary(UnaryExpr* node) {
     Type result;
     TokenType op = node->op.type;
     if (op == BANG) {
-        if (operand.tkind == TypeKind::BOOL) {
+        if (operand.tkind != TypeKind::BOOL) {
             err.error(node->op.get_line(), "!", "Logical not requires bool");
         } else {
             result = Type::make(TypeKind::BOOL);
         }
     } else if (op == MINUS) {
-        if (is_numeric(operand.tkind)) {
+        if (!is_numeric(operand.tkind)) {
             err.error(node->op.get_line(), "-", "Unary minus requires numeric type");
         } else {
             result = operand;

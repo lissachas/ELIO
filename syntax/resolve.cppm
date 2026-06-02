@@ -361,12 +361,27 @@ void Resolver::resolve_if_stmt(IfStmt* node) {
 void Resolver::resolve_break(BreakStmt* node) {
     if (loop_depth == 0)
         err.error(0, "break", "Break outside of loop");
-    if (node->has_value) resolve_node(node->value);
-    if (node->has_tag) {
-        if(!check_tag(node->tag.get_value()))
-            err.error(0, "break_tag", "Break targets unknown tag");
-    }
     
+    switch (node->break_type) {
+        case BreakType::Plain:
+            break;
+        case BreakType::WithValue:
+            if (node->value) resolve_node(node->value);
+            break;
+        case BreakType::WithTag:
+            if (!check_tag(node->tag.get_value()))
+                err.error(node->tag.get_line(),
+                          std::string(node->tag.get_value()),
+                          "Break targets unknown loop tag");
+            break;
+        case BreakType::WithTagValue:
+            if (!check_tag(node->tag.get_value()))
+                err.error(node->tag.get_line(),
+                          std::string(node->tag.get_value()),
+                          "Break targets unknown loop tag");
+            if (node->value) resolve_node(node->value);
+            break;
+    }
 }
 
 void Resolver::resolve_continue(ContinueStmt* node) {

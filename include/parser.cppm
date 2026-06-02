@@ -375,17 +375,25 @@ Node* Parser::parse_return_stmt() {
 Node* Parser::parse_break_stmt() {
     auto* node = arena.alloc<BreakStmt>();
     node->type      = NodeType::BreakStmt;
-    node->has_value = false;
     node->value     = nullptr;
-    if (check(IDENT)) {
-        node->has_tag = true;
-        node->tag = advance();
-    }
-    if (!match(SEMI)) {
-        node->has_value = true;
+
+    if (match(WITH)) {
+        expect(IDENT, "Expected loop label after 'break with'");
+        node->tag = previous();
+
+        if (match(SEMI)) {
+            node->break_type = BreakType::WithTagValue;
+            node->value = parse_expr();
+            expect(SEMI, "Expected ';' after break expression");
+        }
+    } else if (match(SEMI)) {
+        node->break_type = BreakType::Plain;
+    } else {
+        node->break_type = BreakType::WithValue;
         node->value = parse_expr();
-        expect(SEMI, "Expected ';' in break statement");
+        expect(SEMI, "Expected ';' after break expression");
     }
+
     return node;
 }
 
