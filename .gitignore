@@ -5,3 +5,6 @@ build/
 *.out
 .cache/
 CMakeFiles/
+tests/
+out/
+non/

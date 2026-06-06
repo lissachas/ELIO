@@ -20,10 +20,12 @@ using Object = std::variant<int, std::string_view, double>;
 
 export class Lexer {
     public:
+        explicit Lexer(Diagnostics* diag) : diag{diag} {}
         void start(std::string);
+        std::vector<Token> get_tokens() { return tokens; }
 
     private:
-        Token lex();
+        void lex();
         void string();
         void number();
         void identifier();
@@ -31,12 +33,14 @@ export class Lexer {
             return source.at(current++);
         }
         void create_token(TokenType type) {
-            create_token(type, "");
+            create_token(type, std::string_view{""});
         }
         void create_token(TokenType type, Object literal) {
             std::string_view val;
-            if (type == STR) val = source.substr(begin + 1, current - 1);
-            else val = source.substr(begin, current);
+            if (type == STR) 
+                val = std::string_view(source).substr(begin + 1, current - begin - 2);
+            else 
+                val = std::string_view(source).substr(begin, current - begin);
 
             tokens.push_back(Token(val, literal, type, line));
         }
@@ -98,10 +102,10 @@ export class Lexer {
 
         std::vector<Token> tokens;
         std::string source;
-        int begin = 0;
-        int current = 0;
+        std::size_t begin = 0;
+        std::size_t current = 0;
         int line = 0;
-        Error er;
+        Diagnostics* diag;
         bool is_at_end() {
             return current >= source.length();
         }
@@ -117,6 +121,7 @@ export class Lexer {
 // Stacks our tokens
 void Lexer::start(std::string set) {
     source = std::move(set);
+    line = 1;
     while (!is_at_end()) {
         begin = current;
         lex();
@@ -127,7 +132,7 @@ void Lexer::start(std::string set) {
 }
 
 // Just a giant switch case
-Token Lexer::lex() {
+void Lexer::lex() {
     char c = advance();
     switch (c) {
     case ';': create_token(SEMI); break;
@@ -178,7 +183,8 @@ Token Lexer::lex() {
         } else if (is_alpha(c)) { 
             identifier();
         } else {
-            er.error(line, source.substr(current, 1), "Unexpected token");
+            std::string ch(1, c);
+            diag->error(ErrorStage::Lexer, line, ch, "Unexpected character");
         }
         break;
     }
@@ -193,7 +199,7 @@ void Lexer::string() {
     }
 
     if (is_at_end()) {
-        er.error(line, "", "Unterminated string");
+        diag->error(ErrorStage::Lexer, line, "", "Unterminated string literal");
     }
 
     advance();

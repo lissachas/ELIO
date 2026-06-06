@@ -15,6 +15,29 @@ git add .
 git commit -m "refactor: migrate to C++23 modules"
 git push origin modules
 
+./build/elio tests/01.el -o out/01.ll
+./build/elio tests/02.el -o out/02.ll
+./build/elio tests/03.el -o out/03.ll
+./build/elio tests/04.el -o out/04.ll
+./build/elio tests/05.el -o out/05.ll
+./build/elio tests/06.el -o out/06.ll
+./build/elio tests/07.el -o out/07.ll
+./build/elio tests/08.el -o out/08.ll
+./build/elio tests/09.el -o out/09.ll
+./build/elio tests/10.el -o out/10.ll
+./build/elio tests/11.el -o out/11.ll
+./build/elio tests/12.el -o out/12.ll
+./build/elio tests/13.el -o out/13.ll
+
+./build/elio tests/01.el -o out/01.ll --dump-tokens
+./build/elio tests/01.el -o out/01.ll --dump-ast
+./build/elio tests/01.el -o out/01.ll --opt
+
+
+llc -filetype=obj out/13.ll -o out/13.o
+clang out/13.o -o out/13
+./out/13
+
 2. Reference counting / ARC
 
 У каждого объекта есть счётчик ссылок:

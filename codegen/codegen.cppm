@@ -25,6 +25,9 @@ module;
 #include <system_error>
 #include <llvm-19/llvm/IR/Constants.h>
 #include <llvm-19/llvm/IR/Instructions.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/MC/TargetRegistry.h>
 
 
 export module codegen;
@@ -32,23 +35,44 @@ export module codegen;
 import expr;
 import typecheck;
 import tokens;
+import error;
 
 export class Codegen {
     public:
-    Codegen () {
+    Codegen (Diagnostics* diag) : diag{diag} {
         this->context = std::make_unique<llvm::LLVMContext>();
         this->_module = std::make_unique<llvm::Module>("elio", *context);
+
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+
         this->builder = std::unique_ptr<llvm::IRBuilder<>>(new llvm::IRBuilder<>(*context));
+        std::string triple = LLVM_DEFAULT_TARGET_TRIPLE;
+        _module->setTargetTriple(triple);
+
+        std::string err;
+        const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, err);
+        if (target) {
+            auto* tm = target->createTargetMachine(
+                triple, "generic", "",
+                llvm::TargetOptions{},
+                llvm::Reloc::PIC_,      // position-independent code
+                llvm::CodeModel::Small,
+                llvm::CodeGenOptLevel::None
+            );
+            if (tm) _module->setDataLayout(tm->createDataLayout());
+        }
     }
 
     void generate(Node* program);
-    void emit_ir(const std::string& path);
+    void emit_ir(const std::string& path, bool optimize);
     void set_type_checker(TypeChecker* tc) {
         tchecker = tc;
     }
 
 
     private:
+    Diagnostics* diag;
     std::unique_ptr<llvm::LLVMContext> context; // First create unique Context object to tie whole code generation together. Use Context to get access to LLVM data structures like modules and IRBuilder objects
     std::unique_ptr<llvm::Module> _module; // Create named global variables and query them
     std::unique_ptr<llvm::IRBuilder<>> builder; // Object. Incrementally build up IR. Acts something like a current pointer
@@ -111,6 +135,9 @@ export class Codegen {
     llvm::Value* gen_lvalue(Node* node);
     llvm::Value* gen_node(Node*);
     llvm::Type* llvm_type(const Type&);
+    llvm::Value* gen_builtin_call(CallExpr*, std::string_view name);
+    llvm::Function* get_or_declare_printf();
+    llvm::Function* get_or_declare_scanf();
 };
 
 
@@ -139,10 +166,15 @@ void Codegen::generate(Node* program) {
         std::vector<llvm::Type*> param_types;
         for (Node* p : fd->params) {
             auto* param = static_cast<Param*>(p);
-            Type t = tchecker->query_type(param->type_ann ? param->type_ann : param);
+            Type t = param->type_ann
+            ? tchecker->resolve_type(param->type_ann)
+            : Type::make(TypeKind::UNKNOWN);
             param_types.push_back(llvm_type(t));
         }
-        Type ret_t = tchecker->query_type(fd->ret_type ? fd->ret_type : fd);
+        Type ret_t = fd->ret_type
+        ? tchecker->resolve_type(fd->ret_type)
+        : Type::make(TypeKind::UNIT);
+
         auto* fn_type = llvm::FunctionType::get(llvm_type(ret_t), param_types, false);
         // Linkage determines how symbols are visible to the linker and how they are merged during the linking process
         auto* fn = llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, std::string(fd->name.get_value()), *_module);
@@ -158,27 +190,29 @@ void Codegen::generate(Node* program) {
 
 
 // verify -> optimize -> write .ll file
-void Codegen::emit_ir(const std::string& path) {
+void Codegen::emit_ir(const std::string& path, bool optimize) {
     std::string err_str;
     llvm::raw_string_ostream err_os(err_str);
     if (llvm::verifyModule(*_module, &err_os)) {
-        llvm::errs() << "IR verification failed:\n" << err_str << "\n";
+        diag->error(ErrorStage::Codegen, 0, "",
+                    "IR verification failed: " + err_str);
         return;
     }
 
-    llvm::PassBuilder pb;
-    llvm::LoopAnalysisManager lam;
-    llvm::FunctionAnalysisManager fam;
-    llvm::CGSCCAnalysisManager cgam;
-    llvm::ModuleAnalysisManager mam;
-    pb.registerModuleAnalyses(mam);
-    pb.registerCGSCCAnalyses(cgam);
-    pb.registerFunctionAnalyses(fam);
-    pb.registerLoopAnalyses(lam);
-    pb.crossRegisterProxies(lam, fam, cgam, mam);
-    auto mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1);
-    mpm.run(*_module, mam);
-
+    if (optimize) {
+        llvm::PassBuilder pb;
+        llvm::LoopAnalysisManager lam;
+        llvm::FunctionAnalysisManager fam;
+        llvm::CGSCCAnalysisManager cgam;
+        llvm::ModuleAnalysisManager mam;
+        pb.registerModuleAnalyses(mam);
+        pb.registerCGSCCAnalyses(cgam);
+        pb.registerFunctionAnalyses(fam);
+        pb.registerLoopAnalyses(lam);
+        pb.crossRegisterProxies(lam, fam, cgam, mam);
+        auto mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1);
+        mpm.run(*_module, mam);
+    }
     std::error_code ec;
     llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
     if (ec) {
@@ -311,18 +345,31 @@ llvm::Value* Codegen::gen_block(BlockExpr* node) {
 
 // 
 llvm::Value* Codegen::gen_let(LetDecl* node) {
-    Type t = tchecker->query_type(node);
+    Type t = node->type_ann
+        ? tchecker->resolve_type(node->type_ann)
+        : tchecker->query_type(node);
+
     llvm::Type* tllvm = llvm_type(t);
     auto* pat = static_cast<Pattern*>(node->pattern);
+    std::string vname = std::string(pat->name.get_value());
 
-    llvm::AllocaInst* alloca = builder->CreateAlloca(tllvm, nullptr, std::string(pat->name.get_value()));
+    if (node->init && node->init->type == NodeType::StructInit) {
+        llvm::Value* struct_alloca = gen_node(node->init);
+        if (struct_alloca) var_map[pat->name.get_value()] = struct_alloca;
+        return struct_alloca;
+    }
+
+
+    llvm::AllocaInst* alloca = builder->CreateAlloca(tllvm, nullptr, vname);
     var_map[pat->name.get_value()] = alloca;
 
     if (node->init) {
-        llvm::Value* sllvm = gen_node(node->init);
+        llvm::Value* val = gen_node(node->init);
 
-        if (sllvm) {
-            builder->CreateStore(sllvm, alloca);
+        if (val) {
+            if (val->getType()->isPointerTy() && !tllvm->isPointerTy())
+                val = builder->CreateLoad(tllvm, val, "initval");
+            builder->CreateStore(val, alloca);
         }
     }
     
@@ -337,11 +384,17 @@ llvm::Value* Codegen::gen_return(ReturnStmt* node) {
 
     // CreateRet/CreateRetVoid both terminate the current BasicBlock.
     llvm::Value* value = gen_node(node->value);
-    if (value)
-        builder->CreateRet(value);
-    else
+    if (!value)
         builder->CreateRetVoid();
+        
+    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+    llvm::Type* ret_type = fn->getReturnType();
 
+    if (value->getType()->isPointerTy() && !ret_type->isPointerTy()) {
+        value = builder->CreateLoad(ret_type, value, "retval");
+    }
+
+    builder->CreateRet(value);
     return value;
 }
 
@@ -534,6 +587,13 @@ llvm::Value* Codegen::gen_identifier(Identifier* node) {
 
 llvm::Value* Codegen::gen_call(CallExpr* node) {
     auto* id = static_cast<Identifier*>(node->callee);
+
+    if (id->resolved) {
+        auto* fd = static_cast<FunctionDecl*>(id->resolved);
+        if (fd->is_builtin)
+            return gen_builtin_call(node, id->token.get_value());
+    }
+
     auto it = fn_map.find(id->token.get_value());
     if (it == fn_map.end()) return nullptr;
     llvm::Function* fn = it->second;
@@ -680,7 +740,9 @@ llvm::Value* Codegen::gen_struct_decl(StructDecl* node) {
     unsigned idx = 0;
     for (Node* f : node->opt) {
         auto* fd = static_cast<FieldDecl*>(f);
-        Type ft = tchecker->query_type(fd->type_ann ? fd->type_ann : fd);
+        Type ft = fd->type_ann
+            ? tchecker->resolve_type(fd->type_ann)
+            : Type::make(TypeKind::UNKNOWN);
 
         field_types.push_back(llvm_type(ft));
         field_map[name][fd->name.get_value()] = idx++;
@@ -743,5 +805,152 @@ llvm::Value* Codegen::gen_break(BreakStmt* node) {
 llvm::Value* Codegen::gen_continue(ContinueStmt* node) {
     if (loop_continue_bb)
         builder->CreateBr(loop_continue_bb);
+    return nullptr;
+}
+
+llvm::Function* Codegen::get_or_declare_printf() {
+    if (auto* f = _module->getFunction("printf")) return f;
+
+    auto* i8ptr = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+    auto* ft = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(*context), { i8ptr }, true);
+    return llvm::Function::Create(
+        ft, llvm::Function::ExternalLinkage, "printf", *_module);
+}
+
+llvm::Function* Codegen::get_or_declare_scanf() {
+    if (auto* f = _module->getFunction("scanf")) return f;
+
+    auto* i8ptr = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+    auto* ft = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(*context), { i8ptr }, true);
+    return llvm::Function::Create(
+        ft, llvm::Function::ExternalLinkage, "scanf", *_module);
+}
+
+llvm::Value* Codegen::gen_builtin_call(CallExpr* node, std::string_view name) {
+
+    if (name == "print") {
+        llvm::Function* printf_fn = get_or_declare_printf();
+        llvm::Value* arg = gen_node(node->args[0]);
+        if (!arg) return nullptr;
+
+        // Pick format string
+        Type arg_type = tchecker->query_type(node->args[0]);
+        std::string fmt;
+        switch (arg_type.tkind) {
+            case TypeKind::INT8:
+            case TypeKind::INT16:
+            case TypeKind::INT32:  fmt = "%d\n";   break;
+            case TypeKind::INT64:  fmt = "%lld\n"; break;
+            case TypeKind::UINT8:
+            case TypeKind::UINT16:
+            case TypeKind::UINT32: fmt = "%u\n";   break;
+            case TypeKind::UINT64: fmt = "%llu\n"; break;
+            case TypeKind::FLO32:
+            case TypeKind::FLO64: fmt = "%f\n";   break;
+            case TypeKind::BOOL: {
+                auto* true_str  = builder->CreateGlobalStringPtr("true\n",  "bool_true");
+                auto* false_str = builder->CreateGlobalStringPtr("false\n", "bool_false");
+
+                auto* str = builder->CreateSelect(arg, true_str, false_str, "boolstr");
+                auto* fmt_str = builder->CreateGlobalStringPtr("%s", "fmt_bool");
+                return builder->CreateCall(printf_fn, { fmt_str, str }, "printtmp");
+            }
+            case TypeKind::STRING:
+            case TypeKind::STRING_VIEW:
+            case TypeKind::BUF_STRING: fmt = "%s\n"; break;
+            default: fmt = "%d\n"; break;
+        }
+
+
+        if (arg_type.tkind == TypeKind::FLO32)
+            arg = builder->CreateFPExt(arg, llvm::Type::getDoubleTy(*context), "fpext");
+
+        auto* fmt_val = builder->CreateGlobalStringPtr(fmt, "printfmt");
+        return builder->CreateCall(printf_fn, { fmt_val, arg }, "printtmp");
+    }
+
+    if (name == "exit") {
+        auto* exit_fn = _module->getFunction("exit");
+        if (!exit_fn) {
+            auto* ft = llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                { llvm::Type::getInt32Ty(*context) },
+                false);
+            exit_fn = llvm::Function::Create(
+                ft, llvm::Function::ExternalLinkage, "exit", *_module);
+        }
+        llvm::Value* code = gen_node(node->args[0]);
+        if (!code) code = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+        return builder->CreateCall(exit_fn, { code });
+    }
+
+    if (name == "panic") {
+        auto* exit_fn = _module->getFunction("exit");
+        if (!exit_fn) {
+            auto* ft = llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                { llvm::Type::getInt32Ty(*context) }, false);
+            exit_fn = llvm::Function::Create(
+                ft, llvm::Function::ExternalLinkage, "exit", *_module);
+        }
+        
+        llvm::Function* printf_fn = get_or_declare_printf();
+        llvm::Value* msg = gen_node(node->args[0]);
+        auto* fmt = builder->CreateGlobalStringPtr("panic: %s\n", "panicfmt");
+        builder->CreateCall(printf_fn, { fmt, msg });
+        auto* one = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1);
+        builder->CreateCall(exit_fn, { one });
+        
+        builder->CreateUnreachable();
+        return nullptr;
+    }
+
+    if (name == "assert") {
+        
+        llvm::Value* cond = gen_node(node->args[0]);
+        if (!cond) return nullptr;
+
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        auto* fail_bb = llvm::BasicBlock::Create(*context, "assert.fail", fn);
+        auto* pass_bb = llvm::BasicBlock::Create(*context, "assert.pass", fn);
+
+        builder->CreateCondBr(cond, pass_bb, fail_bb);
+
+        builder->SetInsertPoint(fail_bb);
+        llvm::Function* printf_fn = get_or_declare_printf();
+        auto* fmt = builder->CreateGlobalStringPtr("assertion failed\n", "assertfmt");
+        builder->CreateCall(printf_fn, { fmt });
+        auto* exit_fn = _module->getFunction("exit");
+        if (!exit_fn) {
+            auto* ft = llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                { llvm::Type::getInt32Ty(*context) }, false);
+            exit_fn = llvm::Function::Create(
+                ft, llvm::Function::ExternalLinkage, "exit", *_module);
+        }
+        builder->CreateCall(exit_fn,
+            { llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1) });
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(pass_bb);
+        return nullptr;
+    }
+
+    if (name == "input") {
+        auto* scanf_fn = get_or_declare_scanf();
+        auto* buf_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*context), 256);
+        auto* buf = new llvm::GlobalVariable(
+            *_module, buf_type, false,
+            llvm::GlobalValue::PrivateLinkage,
+            llvm::ConstantAggregateZero::get(buf_type), "input_buf");
+        auto* fmt = builder->CreateGlobalStringPtr("%255s", "inputfmt");
+        auto* buf_ptr = builder->CreateBitCast(
+            buf, llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0));
+        builder->CreateCall(scanf_fn, { fmt, buf_ptr });
+        return buf_ptr;
+    }
+
     return nullptr;
 }

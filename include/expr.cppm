@@ -21,9 +21,9 @@ struct Arena {
 
     template<typename T, typename... Args>
     T* alloc(Args&&... args) {
+        assert(offset + sizeof(T) <= buf.size() && "Arena exhausted");
         void* pointer = buf.data() + offset;
         offset += sizeof(T);
-        assert(offset + sizeof(T) <= buf.size() && "Arena exhausted");
         return new(pointer) T(std::forward<Args>(args)...);
     }
 };
@@ -239,6 +239,7 @@ struct FunctionDecl : Node {
     std::vector<Node*> params;   // Param nodes
     Node*              ret_type;
     Node*              body;     // Block or null (for forward decls)
+    bool is_builtin = false;  // For builtin functions - print, assert, exit, panic
 };
 
 struct StructDecl : Node {

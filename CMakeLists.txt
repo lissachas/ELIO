@@ -13,6 +13,8 @@ add_executable(elio
     main.cpp
 )
 
+target_include_directories(elio SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+
 target_include_directories(elio 
     PRIVATE include
     PRIVATE errors
@@ -29,6 +31,8 @@ add_definitions(${LLVM_DEFINITIONS})
 
 llvm_map_components_to_libnames(llvm_libs
     core
+    native  
+    targetparser
     support
     irreader
     passes

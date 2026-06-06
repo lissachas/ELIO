@@ -7,6 +7,7 @@ module;
 #include <variant>
 #include <concepts>
 #include <stdexcept>
+#include <optional>
 
 export module resolve;
 import lexer;
@@ -31,15 +32,22 @@ export class Resolver {
     public:
         // Entry point from main
         void resolve(Node* program);
+        explicit Resolver(Diagnostics* diag) : diag{diag} {}
     
 
     private:
-        Error err;
+        Diagnostics* diag;
         Scope* current = nullptr;
         FunctionDecl* current_fn = nullptr;
         int loop_depth = 0; 
 
         std::vector<std::string_view> active_tags;
+
+        std::optional<FunctionDecl> builtin_print;
+        std::optional<FunctionDecl> builtin_input;
+        std::optional<FunctionDecl> builtin_exit;
+        std::optional<FunctionDecl> builtin_panic;
+        std::optional<FunctionDecl> builtin_assert;
 
 
         void push_scope() {
@@ -55,12 +63,12 @@ export class Resolver {
             if (auto* v = current->lookup_var(n))   return v->decl;
             if (auto* f = current->lookup_fn(n))    return f->decl;
             if (auto* t = current->lookup_type(n))  return t->decl;
-            err.error(name.get_line(), std::string(n), "Undefined identifier");
+            diag->error(ErrorStage::Resolver, name.get_line(), std::string(n), "Undefined identifier");
             return nullptr;
         }
         bool lookup_type_exists(Token name) {
             if (current->lookup_type(name.get_value())) return true;
-            err.error(name.get_line(), std::string(name.get_value()), "Unknown type");
+            diag->error(ErrorStage::Resolver, name.get_line(), std::string(name.get_value()), "Unknown type");
             return false;
         }
         bool lookup_var_is_mutable(Token name) {
@@ -78,6 +86,7 @@ export class Resolver {
         void pop_tag() {
             active_tags.pop_back();
         }
+        void inject_builtins();
     
 
 
@@ -103,7 +112,6 @@ export class Resolver {
         void resolve_continue(ContinueStmt*); 
 
         void resolve_identifier(Identifier*);
-        void resolve_literal(Literal*);
         void resolve_binary(BinaryExpr*);
         void resolve_unary(UnaryExpr*);
         void resolve_call(CallExpr*);
@@ -124,6 +132,7 @@ export class Resolver {
 void Resolver::resolve(Node* program) {
         // Start new global scope
         push_scope();
+        inject_builtins(); // handle builtin fn like print
 
         // Pre-pass
         // Start registering functions
@@ -144,7 +153,11 @@ void Resolver::resolve(Node* program) {
             if (node->type == NodeType::TypeAliasDecl) {
                 auto* ta = static_cast<TypeAliasDecl*>(node);
                 TypeAliasSymbol s { ta->name, ta->target };
-                current->define_alias(ta->name.get_value(), s);
+                if (!current->define_alias(ta->name.get_value(), s))
+                diag->error(ErrorStage::Resolver,
+                            ta->name.get_line(),
+                            std::string(ta->name.get_value()),
+                            "Type alias already defined");
             }
         }
 
@@ -181,12 +194,7 @@ void Resolver::resolve_node(Node* node) {
             resolve_struct(static_cast<StructDecl*>(node));
             break;
         case NodeType::TypeAliasDecl: {
-            auto* ta = static_cast<TypeAliasDecl*>(node);
-            TypeAliasSymbol sym { ta->name, ta->target };
-            if (!current->define_alias(ta->name.get_value(), sym))
-                err.error(ta->name.get_line(),
-                        std::string(ta->name.get_value()),
-                        "Type alias already defined");
+            // pass
             break;
         }
         
@@ -277,7 +285,7 @@ void Resolver::resolve_const(ConstDecl* node) {
         false
     };
     if (!current->define_var(node->ident.get_value(), sym))
-        err.error(node->ident.get_line(),
+        diag->error(ErrorStage::Resolver, node->ident.get_line(),
                   std::string(node->ident.get_value()),
                   "Name already defined in this scope");
 }
@@ -298,7 +306,7 @@ void Resolver::resolve_function(FunctionDecl* node) {
             false  
         };
         if (!current->define_var(param->name.get_value(), sym))
-            err.error(param->name.get_line(),
+            diag->error(ErrorStage::Resolver, param->name.get_line(),
                       std::string(param->name.get_value()),
                       "Duplicate parameter name");
     
@@ -360,7 +368,9 @@ void Resolver::resolve_if_stmt(IfStmt* node) {
 
 void Resolver::resolve_break(BreakStmt* node) {
     if (loop_depth == 0)
-        err.error(0, "break", "Break outside of loop");
+        diag->error(ErrorStage::Resolver, 0,
+                      "break",
+                      "Break outside of loop");
     
     switch (node->break_type) {
         case BreakType::Plain:
@@ -370,13 +380,12 @@ void Resolver::resolve_break(BreakStmt* node) {
             break;
         case BreakType::WithTag:
             if (!check_tag(node->tag.get_value()))
-                err.error(node->tag.get_line(),
+                diag->error(ErrorStage::Resolver, node->tag.get_line(),
                           std::string(node->tag.get_value()),
                           "Break targets unknown loop tag");
-            break;
         case BreakType::WithTagValue:
             if (!check_tag(node->tag.get_value()))
-                err.error(node->tag.get_line(),
+                diag->error(ErrorStage::Resolver, node->tag.get_line(),
                           std::string(node->tag.get_value()),
                           "Break targets unknown loop tag");
             if (node->value) resolve_node(node->value);
@@ -386,17 +395,18 @@ void Resolver::resolve_break(BreakStmt* node) {
 
 void Resolver::resolve_continue(ContinueStmt* node) {
     if (loop_depth == 0) 
-        err.error(0, "continue", "Continue outside of loop");
+        diag->error(ErrorStage::Resolver, 0, "continue", "Continue outside of loop");
     if (node->has_tag) {
         if(!check_tag(node->tag.get_value()))
-            err.error(0, "continue_tag", "Continue inside untagged loop");
+        diag->error(ErrorStage::Resolver, 0, "continue", "Continue outside of loop");
+
     }
     
 }
 
 void Resolver::resolve_return(ReturnStmt* node) {
     if (!current_fn)
-        err.error(0, "return", "Return outside of function");
+        diag->error(ErrorStage::Resolver, 0, "return", "Return outside of function");
     if (node->has_value) 
         resolve_node(node->value);
     
@@ -463,11 +473,7 @@ void Resolver::resolve_identifier(Identifier* node) {
         node->resolved = f->decl;
         return;
     }
-    err.error(node->token.get_line(), std::string(name), "Undefined identifier");
-}
-
-void Resolver::resolve_literal(Literal* node) {
-
+    diag->error(ErrorStage::Resolver, node->token.get_line(), std::string(name), "Undefined identifier");
 }
 
 void Resolver::resolve_binary(BinaryExpr* node) {
@@ -506,7 +512,7 @@ void Resolver::resolve_assign(AssignExpr* node) {
         auto* id = static_cast<Identifier*>(node->target);
         auto* sym = current->lookup_var(id->token.get_value());
         if (sym && id->resolved && !sym->is_mutable)
-            err.error(id->token.get_line(),
+            diag->error(ErrorStage::Resolver, id->token.get_line(),
                       std::string(id->token.get_value()),
                       "Cannot assign to immutable variable");
     }
@@ -537,7 +543,7 @@ void Resolver::resolve_lambda(LambdaExpr* node) {
             false  
         };
         if (!current->define_var(param->name.get_value(), sym))
-            err.error(param->name.get_line(),
+            diag->error(ErrorStage::Resolver, param->name.get_line(),
                       std::string(param->name.get_value()),
                       "Duplicate parameter in lambda");
     }
@@ -547,13 +553,13 @@ void Resolver::resolve_lambda(LambdaExpr* node) {
 }
 
 void Resolver::resolve_block_expr(BlockExpr* node) {
-
+    resolve_block(node);
 }
 
 void Resolver::resolve_struct_init(StructInit* node) {
     // verify struct exist
     if (!current->lookup_type(node->name.get_value()))
-        err.error(node->name.get_line(),
+        diag->error(ErrorStage::Resolver, node->name.get_line(),
                   std::string(node->name.get_value()),
                   "Unknown struct type");
 
@@ -564,7 +570,7 @@ void Resolver::resolve_struct_init(StructInit* node) {
             resolve_node(field->value);
         } else {
             if (!current->lookup_var(field->name.get_value()))
-                err.error(field->name.get_line(),
+                diag->error(ErrorStage::Resolver, field->name.get_line(),
                           std::string(field->name.get_value()),
                           "Undefined variable in struct shorthand init");
         }
@@ -594,7 +600,7 @@ void Resolver::resolve_pattern(Pattern* pat, Node* decl, bool is_mutable) {
             if (pat->name.get_value() != "_") {
                 VarSymbol sym { pat->name, decl, nullptr, is_mutable };
                 if (!current->define_var(pat->name.get_value(), sym))
-                    err.error(pat->name.get_line(),
+                    diag->error(ErrorStage::Resolver, pat->name.get_line(),
                             std::string(pat->name.get_value()),
                             "Name already defined in this scope");
             }
@@ -635,4 +641,27 @@ void Resolver::resolve_match_arm(MatchArm* arm) {
     pop_scope();
 }
 
+void Resolver::inject_builtins() {
+    
+    auto make_builtin = [](std::optional<FunctionDecl>& slot, std::string_view name_sv) -> FunctionDecl* {
+        slot.emplace();
+        slot->type = NodeType::FunctionDecl;
+        slot->is_builtin = true;
+        slot->name = Token(name_sv, std::string_view{""}, IDENT, 0);
+        slot->ret_type = nullptr;  
+        slot->body = nullptr;
+        return &slot.value();
+    };
 
+    auto register_builtin = [&](std::optional<FunctionDecl>& slot, std::string_view name_sv) {
+        FunctionDecl* decl = make_builtin(slot, name_sv);
+        FnSymbol sym { decl->name, decl, nullptr };
+        current->define_fn(name_sv, sym);
+    };
+
+    register_builtin(builtin_print,  "print");
+    register_builtin(builtin_input,  "input");
+    register_builtin(builtin_exit,   "exit");
+    register_builtin(builtin_panic,  "panic");
+    register_builtin(builtin_assert, "assert");
+}

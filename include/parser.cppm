@@ -16,13 +16,18 @@ import expr;
 export class Parser {
     public:
     Node* parse();
-    Parser(std::vector<Token> tokens, Error& err) : err{err}, tokens{tokens}  {}
+    Parser(std::vector<Token> tokens, Diagnostics* diag) : diag{diag}, tokens{tokens}  {}
 
     private:
-    Error& err;
+    Diagnostics* diag;
     Arena arena;
     std::vector<Token> tokens;
     int current = 0;
+
+    static constexpr TokenType reserved_builtins[] = {
+        SIGN, UNSIGN, TRUNC_CAST, CHECK_CAST,
+        WRAP_ADD, WRAP_SUB, WRAP_MUL
+    };
 
     template<typename... Args> 
     requires (std::same_as<Args, TokenType> && ...)
@@ -58,9 +63,17 @@ export class Parser {
         if (is_at_end()) return tokens.at(current);
         return tokens.at(current + 1);
     }
+    Token peek_at(int offset) {
+        size_t idx = current + offset;
+        if (idx >= tokens.size()) return tokens.at(tokens.size() - 1);
+        return tokens.at(idx);
+    }
     Token expect(TokenType type, const std::string& msg) {
         if (check(type)) return advance();
-        err.error(peek().get_line(), std::string(peek().get_value()), msg.c_str());
+        diag->error(ErrorStage::Parser,
+                peek().get_line(),
+                std::string(peek().get_value()),
+                msg);
         throw ParseError{};
     }
 
@@ -143,7 +156,14 @@ Node* Parser::parse() {
         try {
             node->opt.push_back(parse_item());
         } catch (const ParseError&) {
-            synchronize();
+            // Top-level recovery: skip everything until the next top-level declaration keyword or end of file
+            while (!is_at_end()) {
+                TokenType t = peek().type;
+                if (t == FN || t == STRUCT || t == TYPE ||
+                    t == LET || t == CONST)
+                    break;
+                advance();
+            }
         }
     }
     
@@ -157,10 +177,21 @@ Node* Parser::parse_item() {
     if (match(TYPE))   return parse_type_alias();
     if (check(LET) || check(CONST)) return parse_global_decl();
 
-    throw std::runtime_error("Expected function, struct, or global declaration");
+    diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "Expected top-level declaration (fn, struct, type, let, const)");
+    throw ParseError{};
 }
 
 Node* Parser::parse_function_decl() {
+    for (auto rt : reserved_builtins) {
+        if (check(rt)) {
+            diag->error(ErrorStage::Parser, peek().get_line(),
+                        std::string(peek().get_value()),
+                        "Cannot use reserved builtin as function name");
+            throw ParseError{};
+        }
+    }
+
     expect(IDENT, "Expected identifier in function declaration");
     auto* node = arena.alloc<FunctionDecl>();
     node->type = NodeType::FunctionDecl;
@@ -186,10 +217,9 @@ Node* Parser::parse_struct_decl() {
     expect(IDENT, "Expected struct name");
     node->tag = previous();
     expect(LBRKT, "Expected '{'");
-    if (!check(RBRKT)) {
-        do {
-            node->opt.push_back(parse_field_decl());
-        } while (match(COMMA));
+    while (!check(RBRKT) && !is_at_end()) {
+        node->opt.push_back(parse_field_decl());
+        if (!match(COMMA)) break;
     }
     expect(RBRKT, "Expected '}'");
     return node;
@@ -199,7 +229,9 @@ Node* Parser::parse_struct_decl() {
 Node* Parser::parse_global_decl() {
     if (match(LET))   return parse_let_decl();
     if (match(CONST)) return parse_const_decl();
-    throw std::runtime_error("Expected 'let' or 'const'");
+    diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "expected let or const");
+    throw ParseError{}; 
 }
 
 
@@ -299,7 +331,8 @@ Node* Parser::parse_statement() {
             return tnode;
         }
 
-        throw std::runtime_error("Expected while/for/loop after tag");
+        diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "Expected while/for/loop after tag");
     }
 
     return parse_expr_stmt(); 
@@ -382,6 +415,8 @@ Node* Parser::parse_break_stmt() {
         node->tag = previous();
 
         if (match(SEMI)) {
+            node->break_type = BreakType::WithTag;
+        } else {
             node->break_type = BreakType::WithTagValue;
             node->value = parse_expr();
             expect(SEMI, "Expected ';' after break expression");
@@ -423,19 +458,33 @@ Node* Parser::parse_expr() {
 }
 
 Node* Parser::parse_assignment() {
-    if (match(IF)) {
-        return parse_if_expr();
+    if (match(IF))     return parse_if_expr();
+    if (match(MATCH))  return parse_match_expr();
+    if (check(LPAREN)) {
+        bool is_lambda = false;
+        if (peek_next().type == RPAREN) is_lambda = true;
+        else if (peek_next().type == IDENT) {
+            if (peek_at(2).type == COLON)
+                is_lambda = true;
+        }
+        if (is_lambda) {
+            advance();
+            return parse_lambda_expr();
+        }
     }
 
-    if (match(MATCH)) {
-        return parse_match_expr();
+    Node* left = parse_logic_or();
+
+    if (match(EQUAL)) {
+        Node* value  = parse_assignment();
+        auto* node   = arena.alloc<AssignExpr>();
+        node->type   = NodeType::AssignExpr;
+        node->target = left;
+        node->value  = value;
+        return node;
     }
 
-    if (match(LPAREN)) {
-        return parse_lambda_expr();
-    }
-
-    return parse_logic_or();
+    return left;
 }
 
 Node* Parser::parse_if_expr() {
@@ -602,7 +651,7 @@ Node* Parser::parse_additive() {
 Node* Parser::parse_multiplicative() {
     Node* expr = parse_unary();
 
-    while (match(SLASH, STAR)) {
+    while (match(SLASH, STAR, PERCENT)) {
         Token op = previous();
         Node* right = parse_unary();
 
@@ -652,12 +701,12 @@ Node* Parser::parse_postfix() {
             expect(RPAREN, "Expected '(' after arguments");
             expr = bin;
 
-        } else if (match(LBRKT)) {
+        } else if (match(LSQUARE)) {
             auto* bin = arena.alloc<IndexExpr>();
             bin->type  = NodeType::IndexExpr;
             bin->node  = expr;
             bin->index = parse_expr();
-            expect(RBRKT, "Expected ']'");
+            expect(RSQUARE, "Expected ']'");
             expr = bin;
         } else if (match(DOT)) {
             expect(IDENT, "Expected field name after '.'");
@@ -688,6 +737,33 @@ Node* Parser::parse_postfix() {
 
                 expr = bin;
             }
+        } else if (expr->type == NodeType::Identifier && check(LBRKT)) {
+            auto* id = static_cast<Identifier*>(expr);
+            std::string_view nm = id->token.get_value();
+            char first = nm.empty() ? 0 : nm[0];
+            if (first >= 'A' && first <= 'Z') {
+                advance(); // consume '{'
+                auto* init = arena.alloc<StructInit>();
+                init->type = NodeType::StructInit;
+                init->name = id->token;
+                if (!check(RBRKT)) {
+                    do {
+                        expect(IDENT, "Expected field name in struct init");
+                        Token field_name = previous();
+                        auto* fi = arena.alloc<FieldInit>();
+                        fi->type = NodeType::FieldInit;
+                        fi->name = field_name;
+                        if (match(COLON)) { fi->value = parse_expr(); fi->shorthand = false; }
+                        else              { fi->value = nullptr;      fi->shorthand = true; }
+                        init->opt.push_back(fi);
+                    } while (match(COMMA));
+                }
+                expect(RBRKT, "Expected '}' after struct fields");
+                expr = init;
+            } else {
+                break;
+            }
+
 
         } else {
             break;
@@ -708,20 +784,16 @@ Node* Parser::parse_primary() {
     }
 
     if (check(IDENT)) {
-        if (peek_next().type == LBRKT) {
-            return parse_struct_init();
-        } else {
-            Token op = advance();
-            auto* node = arena.alloc<Identifier>();
-            node->token = op;
-            node->type = NodeType::Identifier;
-            return node;
-        }
+        Token op = advance();
+        auto* node = arena.alloc<Identifier>();
+        node->token = op;
+        node->type = NodeType::Identifier;
+        return node;
     }
 
     if (match(LPAREN)) {
         Node* inner = parse_expr();
-        expect(RPAREN, "Expected '(' after arguments");
+        expect(RPAREN, "Expected ')' after arguments");
 
         return inner;
     }
@@ -730,7 +802,9 @@ Node* Parser::parse_primary() {
         return parse_block();
     }
 
-    throw std::runtime_error("Expected expression");
+    diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "Expected expression");
+    throw ParseError{};
 }
 
 Node* Parser::parse_literal() {
@@ -757,7 +831,9 @@ Node* Parser::parse_literal() {
             node->literal = LiteralType::IntLiteral;
         break;
     default:
-        throw std::runtime_error("parse_literal: unexpected token");
+        diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "Parse literal unexpected token");
+            throw ParseError{};
     }
 
     return node;
@@ -806,7 +882,9 @@ Node* Parser::parse_builtin() {
         break;
     
     default:
-        throw std::runtime_error("parse_builtin: unknown builtin");
+        diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "unknown builtin");
+        throw ParseError{};
     }
 
     return node;
@@ -907,7 +985,9 @@ Node* Parser::parse_type() {
         node->name = previous();
         return node;
     }
-    throw std::runtime_error("Expected type");
+    diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "expected type");
+    throw ParseError{};
 }
 
 Node* Parser::parse_pattern() {
@@ -990,7 +1070,9 @@ Node* Parser::parse_pattern() {
         return node;
     }
 
-    throw std::runtime_error("Expected pattern");
+    diag->error(ErrorStage::Parser, peek().get_line(),
+            std::string(peek().get_value()), "Expected pattern");
+    throw ParseError{};
 }
 
 Node* Parser::parse_field_decl() {
