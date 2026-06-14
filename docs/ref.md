@@ -33,10 +33,16 @@ git push origin modules
 ./build/elio tests/01.el -o out/01.ll --dump-ast
 ./build/elio tests/01.el -o out/01.ll --opt
 
+./build/elio tests/14_over.el -o out/14.ll
+./build/elio tests/15_over.el -o out/15.ll
+./build/elio tests/16_over.el -o out/16.ll
+
 
 llc -filetype=obj out/13.ll -o out/13.o
 clang out/13.o -o out/13
 ./out/13
+
+./out/15; echo "exit: $?"
 
 2. Reference counting / ARC
 

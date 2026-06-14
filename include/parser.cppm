@@ -176,6 +176,7 @@ Node* Parser::parse_item() {
     if (match(FN)) return parse_function_decl();
     if (match(STRUCT)) return parse_struct_decl();
     if (match(TYPE))   return parse_type_alias();
+    if (match(ENUM))   return parse_enum();   
     if (check(LET) || check(CONST)) return parse_global_decl();
 
     diag->error(ErrorStage::Parser, peek().get_line(),
@@ -1065,6 +1066,11 @@ Node* Parser::parse_pattern() {
                 if (match(COLON)) fp->inner = parse_pattern();
                 node->fields.push_back(fp);
             } while (match(COMMA));
+        } else if (match(LPAREN)) {
+            // variant pattern: Circle(r) or Pair(a, b)
+            node->pat_type = PatternType::Variant;
+            do { node->fields.push_back(parse_pattern()); } while (match(COMMA));
+            expect(RPAREN, "Expected ')' in variant pattern");
         } else {
         node->pat_type = PatternType::Identifier;
         }
@@ -1101,6 +1107,7 @@ Node* Parser::parse_match_arm() {
     auto* node = arena.alloc<MatchArm>();
     node->type    = NodeType::MatchArm;
     node->pattern = parse_pattern();
+    if (match(IF)) node->guard = parse_expr();
     expect(FAT_ARROW, "Expected '=>'");
 
     if (check(LBRKT)) {
@@ -1113,7 +1120,6 @@ Node* Parser::parse_match_arm() {
 }
 
 Node* Parser::parse_enum() {
-    expect(ENUM, "Expected enum");
     Token name = expect(IDENT, "Expected enum name");
     expect(LBRKT, "Expected '{' in enum");
     auto* decl = arena.alloc<EnumDecl>();

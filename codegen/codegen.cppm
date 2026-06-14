@@ -77,6 +77,7 @@ export class Codegen {
     std::unique_ptr<llvm::Module> _module; // Create named global variables and query them
     std::unique_ptr<llvm::IRBuilder<>> builder; // Object. Incrementally build up IR. Acts something like a current pointer
     TypeChecker* tchecker = nullptr;
+    llvm::StructType* str_type_cache = nullptr;
 
     // MAPS:
     std::unordered_map<std::string_view, llvm::StructType*>  struct_type_map;
@@ -217,6 +218,16 @@ export class Codegen {
         }
     }
 
+    llvm::StructType* string_type() {
+        if (!str_type_cache) {
+            auto* i8p = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+            auto* i64 = llvm::Type::getInt64Ty(*context);
+            // StructType::create makes a NAMED struct, distinct and printable as %string
+            str_type_cache = llvm::StructType::create(*context, { i8p, i64 }, "string");
+        }
+        return str_type_cache;
+    }
+
     // Main dispatch
 
 
@@ -256,6 +267,10 @@ export class Codegen {
     llvm::Value* gen_builtin_call(CallExpr*, std::string_view name);
     llvm::Function* get_or_declare_printf();
     llvm::Function* get_or_declare_scanf();
+    llvm::Function* get_or_declare_exit();
+    llvm::Function* get_or_declare_malloc();
+    llvm::Function* get_or_declare_memcpy();
+    llvm::Function* get_or_declare_memcmp();
 };
 
 
@@ -269,6 +284,12 @@ export class Codegen {
 void Codegen::generate(Node* program) {
     assert(tchecker && "call set_type_checker() before generate");
     auto* root = static_cast<BlockExpr*>(program);
+
+    // Pass zero
+    for (Node* n : root->opt) {
+        if (n->type == NodeType::EnumDecl)
+            gen_enum_decl(static_cast<EnumDecl*>(n));
+    }
 
     // Pass 1: register all struct layouts
     for (Node* n : root->opt) {
@@ -376,6 +397,7 @@ llvm::Value* Codegen::gen_node(Node* node) {
         }
         case NodeType::MatchStmt: return gen_match_stmt(static_cast<MatchStmt*>(node));
         case NodeType::MatchExpr: return gen_match_expr(static_cast<MatchExpr*>(node));
+        case NodeType::EnumDecl: return gen_enum_decl(static_cast<EnumDecl*>(node));
         default: return nullptr;
     }
 }
@@ -1071,12 +1093,13 @@ llvm::Value* Codegen::gen_enum_decl(EnumDecl* node) {
         for (Node* p : v->payload)
             slot_tys.push_back(llvm_type(tchecker->resolve_type(p)));
 
+        variant_index_map[node->name.get_value()][v->name.get_value()] = static_cast<unsigned>(vi);
+
         if (!slot_tys.empty()) {
             auto* pstruct = llvm::StructType::get(*context, slot_tys);
             // llvm::DataLayout::getTypeAllocSize(Type*): returns how many bytes a value of that type occupies in memory, including alignment padding.
             max_bytes = std::max(max_bytes, dl.getTypeAllocSize(pstruct).getFixedValue());
             variant_payload_type[node->name.get_value()][v->name.get_value()] = pstruct;
-            variant_index_map[node->name.get_value()][v->name.get_value()] = static_cast<unsigned>(vi);
         }
     }
 
@@ -1607,4 +1630,38 @@ llvm::Value* Codegen::scrutinee_ptr(Node* subject, const Type& st) {
     llvm::Value* slot = builder->CreateAlloca(llvm_type(st), nullptr, "scrut");
     if (v) builder->CreateStore(v, slot);
     return slot;
+}
+
+// S T R I N G S 
+
+llvm::Function* Codegen::get_or_declare_exit() {
+    if (auto* f = _module->getFunction("exit")) return f;
+    auto* ft = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(*context), { llvm::Type::getInt32Ty(*context) }, false);
+    return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "exit", *_module);
+}
+
+llvm::Function* Codegen::get_or_declare_malloc() {
+    if (auto* f = _module->getFunction("malloc")) return f;
+    auto* i8p = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+    // malloc(i64) -> i8*
+    auto* ft = llvm::FunctionType::get(i8p, { llvm::Type::getInt64Ty(*context) }, false);
+    return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "malloc", *_module);
+}
+
+llvm::Function* Codegen::get_or_declare_memcpy() {
+    if (auto* f = _module->getFunction("memcpy")) return f;
+    auto* i8p = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+    // memcpy(dst, src, n) -> dst
+    auto* ft = llvm::FunctionType::get(i8p, { i8p, i8p, llvm::Type::getInt64Ty(*context) }, false);
+    return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "memcpy", *_module);
+}
+
+llvm::Function* Codegen::get_or_declare_memcmp() {
+    if (auto* f = _module->getFunction("memcmp")) return f;
+    auto* i8p = llvm::PointerType::get(llvm::Type::getInt8Ty(*context), 0);
+    // memcmp(a, b, n) -> i32 (0 if equal)
+    auto* ft = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(*context), { i8p, i8p, llvm::Type::getInt64Ty(*context) }, false);
+    return llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "memcmp", *_module);
 }

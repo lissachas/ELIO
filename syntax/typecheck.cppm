@@ -416,6 +416,13 @@ Type TypeChecker::resolve_type_node(TypeNode* tn) {
             if (it != alias_map.end()) {
                 return it->second; // return the resolved aliased type
             }
+            if (enum_decl_map.count(tn->name.get_value())) {
+                Type t;
+                t.tkind = TypeKind::ENUM;
+                t.struct_name = tn->name.get_value();
+                return t;
+            }
+
             // Otherwise it's a struct
             Type t;
             t.tkind = TypeKind::STRUCT;
@@ -1098,7 +1105,7 @@ void TypeChecker::check_exhaustive(std::vector<Node*>& arms, Type subject) {
         EnumDecl* en = lookup_enum(subject.struct_name);
         if (!en) return;
         auto seen = covered_set([](Pattern* p, std::set<std::string_view>& s) {
-            if (p->pat_type == PatternType::Variant) s.insert(p->name.get_value());
+            if (p->pat_type == PatternType::Variant || p->pat_type == PatternType::Identifier) s.insert(p->name.get_value());
         });
         for (Node* vn : en->variants) {
             auto* v = static_cast<EnumVariant*>(vn);
