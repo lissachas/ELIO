@@ -61,7 +61,7 @@ export class Resolver {
         Node* lookup_any(Token name) {
             std::string_view n = name.get_value();
             if (auto* v = current->lookup_var(n))   return v->decl;
-            if (auto* f = current->lookup_fn(n))    return f->decl;
+            if (auto* f = current->lookup_fn(n))    return f->front().decl;
             if (auto* t = current->lookup_type(n))  return t->decl;
             diag->error(ErrorStage::Resolver, name.get_line(), std::string(n), "Undefined identifier");
             return nullptr;
@@ -158,6 +158,14 @@ void Resolver::resolve(Node* program) {
                             ta->name.get_line(),
                             std::string(ta->name.get_value()),
                             "Type alias already defined");
+            }
+            if (node->type == NodeType::EnumDecl) {
+                auto* en = static_cast<EnumDecl*>(node);
+                current->define_enum(en->name.get_value(), EnumSymbol{ en->name, en });
+                for (unsigned i = 0; i < en->variants.size(); ++i) {
+                    auto* v = static_cast<EnumVariant*>(en->variants[i]);
+                    current->define_ctor(v->name.get_value(), EnumCtorSymbol{ v->name, en, i });
+                }
             }
         }
 
@@ -470,10 +478,8 @@ void Resolver::resolve_identifier(Identifier* node) {
         return;
     }
     if (auto* f = current->lookup_fn(name)) {
-        node->resolved = f->decl;
-        return;
+        node->resolved = f->front().decl;
     }
-    diag->error(ErrorStage::Resolver, node->token.get_line(), std::string(name), "Undefined identifier");
 }
 
 void Resolver::resolve_binary(BinaryExpr* node) {
@@ -487,9 +493,31 @@ void Resolver::resolve_unary(UnaryExpr* node) {
 }
 
 void Resolver::resolve_call(CallExpr* node) {
-    resolve_node(node->callee);
     for (Node* arg: node->args) {
         resolve_node(arg);
+    }
+
+    if (node->callee->type == NodeType::Identifier) {
+        auto* id = static_cast<Identifier*>(node->callee);
+        std::string_view name = id->token.get_value();
+
+        // check enum constructors first
+        if (auto* ctor = current->lookup_ctor(name)) {
+            node->ctor_enum  = ctor->parent;
+            node->ctor_index = static_cast<int>(ctor->index);
+            id->resolved = ctor->parent; // point at EnumDecl as a Node*
+            return;
+        }
+
+        if (auto* set = current->lookup_fn(id->token.get_value())) {
+            for (auto& fs : *set) node->candidates.push_back(fs.decl);
+            if (!set->empty()) id->resolved = (*set)[0].decl;
+            return;
+        }
+
+        resolve_node(node->callee);
+    } else {
+        resolve_node(node->callee);
     }
 }
 
@@ -597,6 +625,10 @@ void Resolver::resolve_pattern(Pattern* pat, Node* decl, bool is_mutable) {
     // Define names into current scope
     switch (pat->pat_type) {
         case PatternType::Identifier:
+            if (current->lookup_ctor(pat->name.get_value())) {
+                pat->pat_type = PatternType::Variant;   // zero-arg variant, not a binding
+                return;
+            }
             if (pat->name.get_value() != "_") {
                 VarSymbol sym { pat->name, decl, nullptr, is_mutable };
                 if (!current->define_var(pat->name.get_value(), sym))
@@ -629,6 +661,13 @@ void Resolver::resolve_pattern(Pattern* pat, Node* decl, bool is_mutable) {
             for (Node* f: pat->fields)
                 resolve_pattern(static_cast<Pattern*>(f), decl, is_mutable);
             break;
+        case PatternType::Variant:
+            if (!current->lookup_ctor(pat->name.get_value()))
+                diag->error(ErrorStage::Resolver, pat->name.get_line(),
+                    std::string(pat->name.get_value()), "Unknown variant in pattern");
+            for (Node* f : pat->fields)
+                resolve_pattern(static_cast<Pattern*>(f), decl, is_mutable);
+            break;
     }
 }
 
@@ -637,6 +676,7 @@ void Resolver::resolve_match_arm(MatchArm* arm) {
     push_scope();
     auto* pat = static_cast<Pattern*>(arm->pattern);
     resolve_pattern(pat, arm, false);
+    if (arm->guard) resolve_node(arm->guard);
     resolve_node(arm->body);
     pop_scope();
 }

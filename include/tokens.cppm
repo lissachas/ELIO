@@ -40,7 +40,7 @@ export enum TokenType {
     FN, STRUCT, LET, CONST, LOOP, MATCH, BREAK, CONTINUE, WITH,
     IN, MUT, SOME, OK, ERR, OPTIONAL, RESULT, SHARED, WEAK,
     SIGN, UNSIGN, TRUNC_CAST, CHECK_CAST, 
-    WRAP_ADD, WRAP_SUB, WRAP_MUL, TYPE,
+    WRAP_ADD, WRAP_SUB, WRAP_MUL, TYPE, ENUM,
 
     //Primitive types
     BOOL, UNIT, INT8, INT16, INT32, INT64,
@@ -161,6 +161,7 @@ export const char* token_type_name(TokenType t) {
         case STRING:        return "STRING";
         case STRING_VIEW:   return "STRING_VIEW";
         case BUF_STRING:    return "BUF_STRING";
+        case ENUM:          return "ENUM";
         case END:           return "END";
         default:            return "UNKNOWN";
     }

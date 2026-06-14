@@ -101,6 +101,7 @@ export class Parser {
     Node* parse_param();
     Node* parse_field_init();
     Node* parse_field_decl();
+    Node* parse_enum();
 
     Node* parse_struct_init();
     Node* parse_builtin();
@@ -1109,4 +1110,27 @@ Node* Parser::parse_match_arm() {
         expect(COMMA, "Expected ',' after match arm expression");
     }
     return node;
+}
+
+Node* Parser::parse_enum() {
+    expect(ENUM, "Expected enum");
+    Token name = expect(IDENT, "Expected enum name");
+    expect(LBRKT, "Expected '{' in enum");
+    auto* decl = arena.alloc<EnumDecl>();
+    decl->type = NodeType::EnumDecl;
+    decl->name = name;
+    while (!check(RBRKT)) {
+        auto* v = arena.alloc<EnumVariant>();
+        v->type = NodeType::EnumVariant;
+        v->name = expect(IDENT, "Expected tag name");
+        if (match(LPAREN)) {                 // payload list
+            do { v->payload.push_back(parse_type()); }
+            while (match(COMMA));
+            expect(RPAREN, "Expected closing ')' in payload list");
+        }
+        decl->variants.push_back(v);
+        if (!match(COMMA)) break;
+    }
+    expect(RBRKT, "Expected '}' in enum");
+    return decl;
 }

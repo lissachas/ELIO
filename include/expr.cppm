@@ -37,7 +37,7 @@ enum class NodeType {
     // Declarations
     LetDecl, ConstDecl, FunctionDecl, StructDecl, TypeAliasDecl,
     // Other
-    TypeNode, Pattern, MatchArm, Param, FieldDecl, FieldInit
+    TypeNode, Pattern, MatchArm, Param, FieldDecl, FieldInit, EnumVariant, EnumDecl
 
 };
 
@@ -65,14 +65,22 @@ enum class PatternType {
     None, True, False,
     Tuple,
     Struct,
-    Some, Ok, Err
+    Some, Ok, Err, 
+    Variant
 };
 
 struct Pattern : Node {
     PatternType pat_type;
     Token name;          // for Identifier, Struct patterns
+    Token lit; // Literal pattern token 
     Node* inner = nullptr; // Some(p), Ok(p), Err(p)
     std::vector<Node*> fields;        // Struct/Tuple pattern children
+};
+
+struct MatchArm : Node {
+    Node* pattern;
+    Node* guard = nullptr;
+    Node* body;
 };
 
 enum class LiteralType {
@@ -102,9 +110,29 @@ struct UnaryExpr: Node {
     Node* operand;
 };
 
+struct FunctionDecl : Node {
+    Token              name;
+    std::vector<Node*> params;   // Param nodes
+    Node*              ret_type;
+    Node*              body;     // Block or null (for forward decls)
+    bool is_builtin = false;  // For builtin functions - print, assert, exit, panic
+};
+
+struct EnumDecl : Node {
+    Token name;
+    std::vector<Node*> variants; // EnumVariant*
+};
+
+
 struct CallExpr: Node {
     Node* callee;
     std::vector<Node*> args;
+    std::vector<FunctionDecl*> candidates; // resolve
+    FunctionDecl* chosen = nullptr; // typecheck
+
+    // enum constructor path (mutually exclusive with chosen)
+    EnumDecl*  ctor_enum  = nullptr;       // which enum this constructs
+    int        ctor_index = -1;            // which variant (-1 = not a ctor)
 };
 
 struct IndexExpr: Node {
@@ -126,11 +154,6 @@ struct IfExpr: Node {
     Node* condition;
     Node* then_block;
     Node* else_expr;
-};
-
-struct MatchArm: Node {
-    Node* pattern;
-    Node* body;
 };
 
 struct MatchExpr: Node {
@@ -234,14 +257,6 @@ struct ConstDecl : Node {
     Node*  init;
 };
 
-struct FunctionDecl : Node {
-    Token              name;
-    std::vector<Node*> params;   // Param nodes
-    Node*              ret_type;
-    Node*              body;     // Block or null (for forward decls)
-    bool is_builtin = false;  // For builtin functions - print, assert, exit, panic
-};
-
 struct StructDecl : Node {
     Token tag;
     std::vector<Node*> opt;
@@ -270,5 +285,15 @@ struct FieldInit : Node {
     Node*  value;       // null if shorthand `{ x }` instead of `{ x: expr }`
     bool   shorthand;
 };
+
+
+// DATA MODEL
+
+// %Name = type { tag, payload }
+struct EnumVariant : Node {
+    Token name;
+    std::vector<Node*> payload; 
+};
+
 
 }

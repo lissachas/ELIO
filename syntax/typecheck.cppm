@@ -1,5 +1,5 @@
 module;
-
+#include <set>  
 #include <string>
 #include <unordered_map>
 #include <string_view>
@@ -35,6 +35,7 @@ export enum class TypeKind {
 
     // User defined
     STRUCT,
+    ENUM,
 
     // Addon
     UNKNOWN, // Errors
@@ -111,6 +112,7 @@ bool types_equal(const Type& a, const Type& b) {
     if (a.inner && b.inner && !types_equal(*a.inner, *b.inner)) return false;
     if (a.inner2 && b.inner2 && !types_equal(*a.inner2, *b.inner2)) return false;
     if (a.tkind == TypeKind::ARRAY) return a.array_size == b.array_size;
+    if (a.tkind == TypeKind::ENUM)   return a.struct_name == b.struct_name;
     return true;
 }
 
@@ -137,6 +139,11 @@ export class TypeChecker {
     std::unordered_map<std::string_view, std::unordered_map<std::string_view, Type>> struct_fields;
     std::unordered_map<std::string_view, Type> fn_return_types;
     FunctionDecl* current_fn = nullptr;
+    std::unordered_map<std::string_view, std::vector<Type>> enum_variant_payloads;
+    // maps enum_name -> payload Type per variant index (UNIT if unit variant)
+    std::unordered_map<std::string_view,
+    std::unordered_map<std::string_view, EnumVariant*>> enum_ctor_map;
+    std::unordered_map<std::string_view, EnumDecl*> enum_decl_map;
     std::unordered_map<std::string_view, Type> var_types;
     std::vector<Type> current_loop_break_types;
     std::unordered_map<std::string_view, Type> alias_map;
@@ -190,6 +197,8 @@ export class TypeChecker {
             case TypeKind::UNIT_:  return "unit";
             case TypeKind::REF:    return "&" + type_to_string(*t.inner);
             case TypeKind::MUTREF: return "&mut " + type_to_string(*t.inner);
+            case TypeKind::ENUM:
+                return "enum " + std::string(t.struct_name);
             default: return "?";
         }
     }
@@ -215,6 +224,7 @@ export class TypeChecker {
     void check_break(BreakStmt*);
     void check_continue(ContinueStmt*);
     void check_match_stmt(MatchStmt*);
+    void check_exhaustive(std::vector<Node*>&, Type);
 
     // expressions
     Type check_literal(Literal*);
@@ -235,7 +245,8 @@ export class TypeChecker {
     Type check_block_expr(BlockExpr*);
     Type check_struct_init(StructInit*);
     Type check_builtin(BuiltinCast*);
-
+    void check_enum_decl(EnumDecl*);
+    Type check_enum(CallExpr*);
     // helpers
     Type check_builtin_call(CallExpr*, std::string_view name);
     Type check_match_arm(MatchArm*, Type subject_type);
@@ -285,6 +296,70 @@ export class TypeChecker {
         set_type(node, t);
         return t;
     }
+
+
+    // Overload helpers
+    int int_rank(TypeKind tk) {
+        switch (tk) {
+            case TypeKind::INT8: case TypeKind::UINT8: return 1;
+            case TypeKind::INT16: case TypeKind::UINT16: return 2;
+            case TypeKind::INT32: case TypeKind::UINT32: return 3;
+            case TypeKind::INT64: case TypeKind::UINT64: return 4;
+            default: return 0;
+        }
+    }
+
+    bool same_signedness(TypeKind a, TypeKind b) {
+        bool a_signed = is_integer(a) &&
+            (a==TypeKind::INT8||a==TypeKind::INT16||a==TypeKind::INT32||a==TypeKind::INT64);
+        bool b_signed = is_integer(b) &&
+            (b==TypeKind::INT8||b==TypeKind::INT16||b==TypeKind::INT32||b==TypeKind::INT64);
+        return a_signed == b_signed;
+    }
+
+    // Disallowed:
+    // int to float, narrowing and signed to unsigned
+    bool can_promote(TypeKind from, TypeKind to) {
+        if (from == to) return true;
+        if (is_integer(from) && is_integer(to))
+            return same_signedness(from, to) && int_rank(from) < int_rank(to);
+        if (from == TypeKind::FLO32 && to == TypeKind::FLO64) return true;
+        return false; 
+    }
+
+    EnumVariant* lookup_ctor_in_enum(std::string_view enum_name, std::string_view ctor_name) {
+        auto eit = enum_ctor_map.find(enum_name);
+        if (eit == enum_ctor_map.end()) return nullptr;
+        auto cit = eit->second.find(ctor_name);
+        if (cit == eit->second.end()) return nullptr;
+        return cit->second;
+    }
+
+    EnumDecl* lookup_enum(std::string_view name) {
+        auto it = enum_decl_map.find(name);
+        return it != enum_decl_map.end() ? it->second : nullptr;
+    }
+
+    EnumVariant* find_variant(EnumDecl* en, std::string_view name) {
+        for (Node* vn : en->variants) {
+            auto* v = static_cast<EnumVariant*>(vn);
+            if (v->name.get_value() == name) return v;
+        }
+        return nullptr;
+    }
+
+    Type literal_token_type(const Token& tok) {
+        if (tok.type == TokenType::STR)
+            return Type::make(TypeKind::STRING);
+        if (tok.type == TokenType::TRUE || tok.type == TokenType::FALSE)
+            return Type::make(TypeKind::BOOL);
+        // VAL - check source string for '.' to distinguish int from float
+        auto sv = tok.get_value();
+        if (sv.find('.') != std::string_view::npos)
+            return Type::make(TypeKind::FLO64); // default float literal type
+        return Type::make(TypeKind::INT32);     // default int literal type
+    }
+
 };
 
 // Start by resolving all types
@@ -373,12 +448,19 @@ void TypeChecker::check(Node* program) {
         if (item->type == NodeType::StructDecl)
             check_struct(static_cast<StructDecl*>(item));
     }
+    for (Node* item : root->opt) {
+        if (item->type == NodeType::EnumDecl)
+            check_enum_decl(static_cast<EnumDecl*>(item));
+    }
 
     // pre-pass 2: register function signatures
     for (Node* item : root->opt) {
         if (item->type == NodeType::FunctionDecl) {
             auto* fn = static_cast<FunctionDecl*>(item);
-            fn_return_types[fn->name.get_value()] = resolve_type_node(static_cast<TypeNode*>(fn->ret_type));
+            Type ret = fn->ret_type
+                ? resolve_type_node(static_cast<TypeNode*>(fn->ret_type))
+                : Type::make(TypeKind::UNIT);
+            fn_return_types[fn->name.get_value()] = ret;
         }
     }
 
@@ -389,6 +471,17 @@ void TypeChecker::check(Node* program) {
         alias_map[ta->name.get_value()] = resolve_type_node(static_cast<TypeNode*>(ta->target));
     }
 }
+
+    // Pass 4 T T (top decl)
+    for (Node* item : root->opt) {
+        if (item->type == NodeType::ConstDecl) {
+            auto* cd = static_cast<ConstDecl*>(item);
+            Type t = cd->type_ann
+                ? resolve_type_node(static_cast<TypeNode*>(cd->type_ann))
+                : Type::make(TypeKind::UNKNOWN); 
+            var_types[cd->ident.get_value()] = t;
+        }
+    }
 
     // main pass
     for (Node* item : root->opt)
@@ -437,6 +530,8 @@ Type TypeChecker::check_node(Node* node) {
         case NodeType::LambdaExpr: return check_lambda(static_cast<LambdaExpr*>(node));
         case NodeType::StructInit: return check_struct_init(static_cast<StructInit*>(node));
         case NodeType::BuiltInCast: return check_builtin(static_cast<BuiltinCast*>(node));
+        case NodeType::EnumDecl:
+        check_enum_decl(static_cast<EnumDecl*>(node)); return Type::make(TypeKind::UNIT_);
         default: return Type::make(TypeKind::UNIT_);
     }
 }
@@ -522,9 +617,11 @@ void TypeChecker::check_const(ConstDecl* node) {
 // =====================================================
 
 Type TypeChecker::check_block(BlockExpr* node) {
+    auto saved = var_types;          
     Type last = Type::make(TypeKind::UNIT_);
     for (Node* s : node->opt)
         last = check_node(s);
+    var_types = std::move(saved);
     set_type(node, last);
     return last;
 }
@@ -683,6 +780,7 @@ Type TypeChecker::check_binary(BinaryExpr* node) {
         return check_arithmetic(node, left, right);
 
     
+        
     // unknown op
     set_type(node, Type::make(TypeKind::UNKNOWN));
     return Type::make(TypeKind::UNKNOWN);
@@ -818,50 +916,82 @@ Type TypeChecker::check_unary(UnaryExpr* node) {
 }
 
 Type TypeChecker::check_call(CallExpr* node) {
+    if (node->ctor_index >= 0)
+        return check_enum(node);
+
     if (node->callee->type != NodeType::Identifier)
         return unknown(node);
 
     auto* id = static_cast<Identifier*>(node->callee);
 
-    if (!id->resolved || id->resolved->type != NodeType::FunctionDecl) {
-        for (Node* a : node->args) check_node(a);
+    // builtins keep their old path
+    if (!node->candidates.empty() && node->candidates[0]->is_builtin) return check_builtin_call(node, id->token.get_value());
+
+    // type each argument once 
+    std::vector<Type> arg_types;
+    for (Node* a : node->args) arg_types.push_back(check_node(a));
+
+    // viable exact-match candidates
+    std::vector<FunctionDecl*> viable;
+    for (FunctionDecl* cand : node->candidates) {
+        if (cand->params.size() != arg_types.size()) continue;
+        bool ok = true;
+        for (size_t i = 0; i < arg_types.size(); ++i) {
+            auto* p = static_cast<Param*>(cand->params[i]);
+            Type pt = resolve_type_node(static_cast<TypeNode*>(p->type_ann));
+            if (!types_equal(pt, arg_types[i])) {ok = false; break;}
+        }
+        if (ok) viable.push_back(cand);
+    }
+
+    if (viable.empty()) {
+        std::vector<FunctionDecl*> promotable;
+        for (FunctionDecl* cand : node->candidates) {
+            if (cand->params.size() != arg_types.size()) continue;
+            bool ok = true;
+            for (size_t i = 0; i < arg_types.size(); ++i) {
+                auto* p = static_cast<Param*>(cand->params[i]);
+                Type pt = resolve_type_node(static_cast<TypeNode*>(p->type_ann));
+                if (!can_promote(arg_types[i].tkind, pt.tkind)) { ok = false; break; }
+            }
+            if (ok) promotable.push_back(cand);
+        }
+        if (promotable.size() == 1) { viable = promotable; }
+        else if (promotable.size() > 1) {
+            diag->error(ErrorStage::TypeChecker, id->token.get_line(),
+                std::string(id->token.get_value()),
+                "Ambiguous overload under implicit promotion");
+            return unknown(node);
+        }
+    }
+
+
+    if (viable.empty()) {
+        diag->error(ErrorStage::TypeChecker, id->token.get_line(),
+            std::string(id->token.get_value()),
+            "No overload of '" + std::string(id->token.get_value()) +
+            "' matches the argument types");
         return unknown(node);
     }
 
-    auto* fn = static_cast<FunctionDecl*>(id->resolved);
-    if (!fn) return unknown(node);
 
-    if (fn->is_builtin)
-        return check_builtin_call(node, id->token.get_value());
-
-    // check arg count
-    if (node->args.size() != fn->params.size()) {
-        diag->error(ErrorStage::TypeChecker, id->token.get_line(), std::string(id->token.get_value()),
-                  "Expected " + std::to_string(fn->params.size()) +
-                  " arguments, got " + std::to_string(node->args.size()));
+    if (viable.size() > 1) {
+        diag->error(ErrorStage::TypeChecker, id->token.get_line(),
+            std::string(id->token.get_value()),
+            "Ambiguous call: multiple overloads match");
         return unknown(node);
     }
 
-    // each arg against param
-    for (size_t i = 0; i < node->args.size(); i++) {
-        Type arg_t = check_node(node->args[i]);
-        auto* param = static_cast<Param*>(fn->params[i]);
-        Type param_t = resolve_type_node(static_cast<TypeNode*>(param->type_ann));
-        if (arg_t.tkind != TypeKind::UNKNOWN && !types_equal(arg_t, param_t))
-            diag->error(ErrorStage::TypeChecker, 0, "call", "Argument " + std::to_string(i+1) +
-                      " type mismatch: expected " + type_to_string(param_t) +
-                      ", got " + type_to_string(arg_t));
-    
-    }
+    FunctionDecl* chosen = viable.front();
+    node->chosen = chosen;      // codegen
+    id->resolved = chosen;
 
-    if (!fn->ret_type) {
-        set_type(node, Type::make(TypeKind::UNIT));
-        return Type::make(TypeKind::UNIT);
-    }
-
-    Type ret = resolve_type_node(static_cast<TypeNode*>(fn->ret_type));
+    Type ret = chosen->ret_type
+        ? resolve_type_node(static_cast<TypeNode*>(chosen->ret_type))
+        : Type::make(TypeKind::UNIT);
     set_type(node, ret);
     return ret;
+
 }
 
 Type TypeChecker::check_index(IndexExpr* node) {
@@ -938,13 +1068,70 @@ Type TypeChecker::check_match_expr(MatchExpr* node) {
             diag->error(ErrorStage::TypeChecker, 0, "match", "match arms have inconsistent types");
     }
 
+    check_exhaustive(node->arms, subject);
     set_type(node, result);
     return result;
 }
 
-Type TypeChecker::check_match_arm(MatchArm* arm, Type subject_type) {
-    check_pattern(static_cast<Pattern*>(arm->pattern), subject_type);
+void TypeChecker::check_exhaustive(std::vector<Node*>& arms, Type subject) {
+    bool catch_all = false;
+    for (Node* a : arms) {
+        auto* arm = static_cast<MatchArm*>(a);
+        if (arm->guard) continue;
+        auto* p = static_cast<Pattern*>(arm->pattern);
+        if (p->pat_type == PatternType::Wildcard || p->pat_type == PatternType::Identifier)
+            catch_all = true;
+    }
+    if (catch_all) return;
+
+    auto covered_set = [&](auto pred) {
+        std::set<std::string_view> seen;
+        for (Node* a : arms) {
+            auto* arm = static_cast<MatchArm*>(a);
+            if (arm->guard) continue;
+            pred(static_cast<Pattern*>(arm->pattern), seen);
+        }
+        return seen;
+    };
+
+    if (subject.tkind == TypeKind::ENUM) {
+        EnumDecl* en = lookup_enum(subject.struct_name);
+        if (!en) return;
+        auto seen = covered_set([](Pattern* p, std::set<std::string_view>& s) {
+            if (p->pat_type == PatternType::Variant) s.insert(p->name.get_value());
+        });
+        for (Node* vn : en->variants) {
+            auto* v = static_cast<EnumVariant*>(vn);
+            if (!seen.count(v->name.get_value()))
+                diag->error(ErrorStage::TypeChecker, 0, "match",
+                    "Non-exhaustive match: variant '" +
+                    std::string(v->name.get_value()) + "' not handled");
+        }
+    } else if (subject.tkind == TypeKind::OPTIONAL) {
+        bool some=false,none=false;
+        for (Node* a : arms){auto*m=static_cast<MatchArm*>(a); if(m->guard)continue;
+            auto t=static_cast<Pattern*>(m->pattern)->pat_type;
+            some|=t==PatternType::Some; none|=t==PatternType::None;}
+        if(!some||!none) diag->error(ErrorStage::TypeChecker,0,"match","Non-exhaustive match on optional");
+    } else if (subject.tkind == TypeKind::RESULT) {
+        bool ok=false,err=false;
+        for (Node* a : arms){auto*m=static_cast<MatchArm*>(a); if(m->guard)continue;
+            auto t=static_cast<Pattern*>(m->pattern)->pat_type;
+            ok|=t==PatternType::Ok; err|=t==PatternType::Err;}
+        if(!ok||!err) diag->error(ErrorStage::TypeChecker,0,"match","Non-exhaustive match on result");
+    }
+}
+
+Type TypeChecker::check_match_arm(MatchArm* arm, Type subject) {
+    auto saved = var_types; // arm-scoped bindings
+    check_pattern(static_cast<Pattern*>(arm->pattern), subject);
+    if (arm->guard) {
+        Type g = check_node(arm->guard);
+        if (g.tkind != TypeKind::BOOL && g.tkind != TypeKind::UNKNOWN)
+            diag->error(ErrorStage::TypeChecker, 0, "guard", "match guard must be bool");
+    }
     Type body_t = check_node(arm->body);
+    var_types = std::move(saved);
     set_type(arm, body_t);
     return body_t;
 }
@@ -953,9 +1140,47 @@ void TypeChecker::check_pattern(Pattern* pat, Type subject) {
     switch (pat->pat_type) {
         case PatternType::Wildcard:
         case PatternType::Identifier:
-            if (pat->pat_type == PatternType::Identifier)
-                var_types[pat->name.get_value()] = subject;
+            var_types[pat->name.get_value()] = subject;     // bind type
             break;
+
+        case PatternType::Literal: {
+            Type lt = literal_token_type(pat->name);         // your token->Type helper
+            if (subject.tkind != TypeKind::UNKNOWN && !types_equal(lt, subject))
+                diag->error(ErrorStage::TypeChecker, pat->lit.get_line(),
+                    std::string(pat->lit.get_value()),
+                    "Literal pattern does not match scrutinee type " + type_to_string(subject));
+            break;
+        }
+
+        case PatternType::Variant: {
+            if (subject.tkind != TypeKind::ENUM) {
+                diag->error(ErrorStage::TypeChecker, pat->name.get_line(),
+                    std::string(pat->name.get_value()),
+                    "Variant pattern on non-enum type " + type_to_string(subject));
+                return;
+            }
+            EnumDecl* en = lookup_enum(subject.struct_name);
+            EnumVariant* v = en ? find_variant(en, pat->name.get_value()) : nullptr;
+            if (!v) {
+                diag->error(ErrorStage::TypeChecker, pat->name.get_line(),
+                    std::string(pat->name.get_value()), "Unknown variant");
+                return;
+            }
+            if (pat->fields.size() != v->payload.size()) {
+                diag->error(ErrorStage::TypeChecker, pat->name.get_line(),
+                    std::string(pat->name.get_value()),
+                    "Variant pattern arity mismatch: expected " +
+                    std::to_string(v->payload.size()) + ", got " +
+                    std::to_string(pat->fields.size()));
+                return;
+            }
+            for (size_t i = 0; i < pat->fields.size(); ++i) {
+                Type slot = resolve_type_node(static_cast<TypeNode*>(v->payload[i]));
+                check_pattern(static_cast<Pattern*>(pat->fields[i]), slot);   // nested
+            }
+            break;
+        }
+
         case PatternType::Some:
         if (subject.tkind != TypeKind::OPTIONAL && subject.tkind != TypeKind::UNKNOWN)
             diag->error(ErrorStage::TypeChecker, 0, "some", "some() pattern requires optional type");
@@ -1024,14 +1249,27 @@ Type TypeChecker::check_builtin(BuiltinCast* node) {
     Type first = check_node(node->first);
 
     switch (node->builtin.type) {
-    case SIGN:   // unsign -> sign, same width
+    case SIGN:
         if (first.tkind == TypeKind::UNKNOWN) return unknown(node);
-        // e.g. uint32 -> int32
-        // for now just check it's numeric and return UNKNOWN until you map widths
-        if (!is_integer(first.tkind))
-            diag->error(ErrorStage::TypeChecker, node->builtin.get_line(), "sign", "sign() requires integer type");
-        // TODO: map uint->int of same width
-        return unknown(node); // replace with correct mapped type
+        if (!is_integer(first.tkind)) {
+            diag->error(ErrorStage::TypeChecker, node->builtin.get_line(),
+                        "sign", "sign() requires integer type");
+            return unknown(node);
+        }
+        {
+            // Map uint -> int of same width
+            TypeKind result_kind = first.tkind;
+            switch (first.tkind) {
+                case TypeKind::UINT8:  result_kind = TypeKind::INT8;  break;
+                case TypeKind::UINT16: result_kind = TypeKind::INT16; break;
+                case TypeKind::UINT32: result_kind = TypeKind::INT32; break;
+                case TypeKind::UINT64: result_kind = TypeKind::INT64; break;
+                default: break; // already signed, pass through
+            }
+            Type result = Type::make(result_kind);
+            set_type(node, result);
+            return result;
+        }
     case TRUNC_CAST:
     case CHECK_CAST: {
         Type target = resolve_type_node(static_cast<TypeNode*>(node->type_arg));
@@ -1125,4 +1363,64 @@ Type TypeChecker::check_builtin_call(CallExpr* node, std::string_view name) {
     // Unknown builtin
     for (Node* a : node->args) check_node(a);
     return unknown(node);
+}
+
+void TypeChecker::check_enum_decl(EnumDecl* node) {
+    enum_decl_map[node->name.get_value()] = node;
+    std::vector<Type> payloads;
+    std::unordered_map<std::string_view, EnumVariant*> ctor_map;
+
+    for (Node* v : node->variants) {
+        auto* variant = static_cast<EnumVariant*>(v);
+        Type payload_t = variant->payload.empty()
+            ? Type::make(TypeKind::UNIT)
+            : resolve_type_node(static_cast<TypeNode*>(variant->payload[0]));
+
+        payloads.push_back(payload_t);
+        ctor_map[variant->name.get_value()] = variant;
+    }
+
+    enum_variant_payloads[node->name.get_value()] = std::move(payloads);
+    enum_ctor_map[node->name.get_value()] = std::move(ctor_map);
+}
+
+Type TypeChecker::check_enum(CallExpr* node) {
+    EnumDecl* decl = node->ctor_enum;
+    int idx = node->ctor_index;
+
+    auto* variant = static_cast<EnumVariant*>(decl->variants[idx]);
+
+    if (variant->payload.empty()) {
+        // unit variant - no arguments allowed
+        if (!node->args.empty())
+            diag->error(ErrorStage::TypeChecker,
+                variant->name.get_line(),
+                std::string(variant->name.get_value()),
+                "Variant '" + std::string(variant->name.get_value()) +
+                "' takes no arguments");
+    } else {
+        // payload variant - exactly 1 argument
+        if (node->args.size() != 1) {
+            diag->error(ErrorStage::TypeChecker,
+                variant->name.get_line(),
+                std::string(variant->name.get_value()),
+                "Variant '" + std::string(variant->name.get_value()) +
+                "' takes exactly 1 argument");
+        } else {
+            Type arg_t    = check_node(node->args[0]);
+            Type expected = resolve_type_node(static_cast<TypeNode*>(variant->payload[0]));
+            if (arg_t.tkind != TypeKind::UNKNOWN && !types_equal(arg_t, expected))
+                diag->error(ErrorStage::TypeChecker,
+                    variant->name.get_line(),
+                    std::string(variant->name.get_value()),
+                    "Payload type mismatch: expected " + type_to_string(expected) +
+                    ", got " + type_to_string(arg_t));
+        }
+    }
+
+    Type result;
+    result.tkind       = TypeKind::ENUM;
+    result.struct_name = decl->name.get_value(); // reuse struct_name - holds the enum type name
+    set_type(node, result);
+    return result;
 }

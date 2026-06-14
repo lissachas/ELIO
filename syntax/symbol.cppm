@@ -45,6 +45,17 @@ export struct TypeAliasSymbol {
     Node* target; // TypeNode* of the aliased type
 };
 
+export struct EnumSymbol {
+    Token name;
+    EnumDecl* decl;
+};
+
+export struct EnumCtorSymbol {
+    Token name;           // the constructor name
+    EnumDecl* parent;     // which enum it belongs to
+    unsigned index;       // position in variants[]
+};
+
 export using Symbol = std::variant<VarSymbol, FnSymbol, StructSymbol, ParamSymbol, TypeAliasSymbol>;
 
 export Token symbol_name(const Symbol& s) {
@@ -55,9 +66,11 @@ export Token symbol_name(const Symbol& s) {
 export class Scope {
     public:
         std::unordered_map<std::string_view, VarSymbol> var_table;      // let, const, param
-        std::unordered_map<std::string_view, FnSymbol> fn_table;       // functions
+        std::unordered_map<std::string_view, std::vector<FnSymbol>> fn_table;       //overloading functions
         std::unordered_map<std::string_view, StructSymbol> type_table;
         std::unordered_map<std::string_view, TypeAliasSymbol> alias_table;
+        std::unordered_map<std::string_view, EnumSymbol>     enum_table;
+        std::unordered_map<std::string_view, EnumCtorSymbol> ctor_table;
         Scope* parent = nullptr;
 
         explicit Scope(Scope* parent) : parent{parent} {}
@@ -68,7 +81,7 @@ export class Scope {
             if (it != var_table.end()) return &it->second;
             return parent ? parent->lookup_var(name) : nullptr;
         }
-        FnSymbol* lookup_fn(std::string_view name) {
+        std::vector<FnSymbol>* lookup_fn(std::string_view name) {
             auto it = fn_table.find(name);
             if (it != fn_table.end()) return &it->second;
             return parent ? parent->lookup_fn(name) : nullptr;
@@ -84,16 +97,26 @@ export class Scope {
             return parent ? parent->lookup_alias(name) : nullptr;
         }
 
+        EnumSymbol* lookup_enum(std::string_view name) {
+            auto it = enum_table.find(name);
+            if (it != enum_table.end()) return &it->second;
+            return parent ? parent->lookup_enum(name) : nullptr;
+        }
+
+        EnumCtorSymbol* lookup_ctor(std::string_view name) {
+            auto it = ctor_table.find(name);
+            if (it != ctor_table.end()) return &it->second;
+            return parent ? parent->lookup_ctor(name) : nullptr;
+        }
+
         // define -----------
         bool define_var(std::string_view name, VarSymbol sym) {
             if (var_table.contains(name)) return false;
             var_table[name] = sym;
             return true;
         }
-        bool define_fn(std::string_view name, FnSymbol sym) {
-            if (fn_table.contains(name)) return false;
-            fn_table[name] = sym;
-            return true;
+        void define_fn(std::string_view name, FnSymbol sym) {
+            fn_table[name].push_back(sym);
         }
         bool define_type(std::string_view name, StructSymbol sym) {
             if (type_table.contains(name)) return false;
@@ -104,6 +127,17 @@ export class Scope {
             if (alias_table.contains(name)) return false;
             alias_table[name] = sym;
             return true;
+        }
+
+        bool define_enum(std::string_view name, EnumSymbol sym) {
+            if (enum_table.contains(name)) return false;
+            enum_table[name] = sym;
+            return true;
+        }
+
+        void define_ctor(std::string_view name, EnumCtorSymbol sym) {
+            // constructors can't be overloaded, so same duplicate-guard as define_type
+            ctor_table[name] = sym;
         }
         
         bool has_local_var(std::string_view name) const {
